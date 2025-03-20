@@ -419,7 +419,13 @@ def analyze_intent(state: TenantState) -> TenantState:
     # Infer store automatically
     user_stores = db_fetch_all("SELECT name_en FROM stores WHERE tenant_id = %s", (state.user_id,))
     if "store" in state.collected_data:
-        state.store_name = state.collected_data["store"]
+        requested_store = state.collected_data["store"]
+        matching_store = next((s for s in user_stores if s["name_en"].lower() == requested_store.lower()), None)
+
+        if matching_store:
+            state.store_name = matching_store["name_en"]
+        else:
+            state.response = f"I couldn’t find a store named '{requested_store}'. You can manage only your stores. Here are your stores: {', '.join([s['name_en'] for s in user_stores])}"
     elif len(user_stores) == 1:
         state.store_name = user_stores[0]["name_en"]
     elif len(user_stores) > 1 and not state.store_name:
@@ -567,10 +573,15 @@ def process_input(state: TenantState) -> TenantState:
     return prompt_for_missing_info(state)
 
 def execute_operation(state: TenantState) -> None:
-    store_id = db_fetch_one(
+    store = db_fetch_one(
         "SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s",
         (state.store_name, state.user_id)
-    )["store_id"]
+    )
+    if not store:
+        state.response = f"I couldn’t find {state.store_name} in the list of stores you manage."
+        return
+    
+    store_id = store["store_id"]
     
     if state.entity_type == "offer":
         if state.action == "create":
