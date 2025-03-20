@@ -59,7 +59,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 class Message(BaseModel):
     role: str
     content: str
@@ -84,7 +83,6 @@ class UpdateRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
-
 
 def db_fetch_one(query: str, params: tuple = ()):
     try:
@@ -143,21 +141,18 @@ def detect_language(text: str) -> str:
     except Exception:
         return "en"
 
-# Conversation memory functions
 def get_or_create_session(session_id: Optional[str], user_id: Optional[str], language: str) -> str:
     if session_id:
-        # Update the session's last activity time
         db_execute(
             "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE session_id = %s",
             (session_id,)
         )
         return session_id
     else:
-        # Create a new session
         new_session_id = str(uuid.uuid4())
         db_execute(
-            "INSERT INTO conversations (session_id, user_id, language) VALUES (%s, %s, %s)",
-            (new_session_id, user_id, language)
+            "INSERT INTO conversations (session_id, user_id, language, current_state) VALUES (%s, %s, %s, %s)",
+            (new_session_id, user_id, language, json.dumps({}))
         )
         return new_session_id
 
@@ -173,7 +168,6 @@ def get_conversation_history(session_id: str, max_messages: int = 10) -> List[Me
         "WHERE session_id = %s ORDER BY timestamp DESC LIMIT %s",
         (session_id, max_messages)
     )
-    # Return in chronological order
     return [
         Message(role=msg["role"], content=msg["content"], timestamp=msg["timestamp"])
         for msg in reversed(messages)
@@ -253,7 +247,7 @@ customer_prompt = PromptTemplate(
 )
 
 # LLM and chain for customer queries
-llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro", api_key=GEMINI_API_KEY)
+llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", api_key=GEMINI_API_KEY)
 customer_chain = customer_prompt | llm | StrOutputParser()
 
 # Customer state
@@ -268,7 +262,6 @@ class CustomerState(PydanticBaseModel):
 
 # Customer workflow nodes
 def retrieve_context(state: CustomerState) -> CustomerState:
-    # Detect mall if mentioned
     mall_name = None
     if "nakheel mall" in state.query.lower():
         mall_name = "Nakheel Mall"
@@ -278,18 +271,14 @@ def retrieve_context(state: CustomerState) -> CustomerState:
         if mall:
             filter = {"mall_id": mall["mall_id"]}
     
-    # Check conversation history for entity references
     query = state.query
     history = state.conversation_history
     
-    # Example of resolving references from history
     if history and any(word in query.lower() for word in ["it", "they", "that", "this", "there", "those"]):
-        # Use the last assistant message as context
         last_exchanges = [msg for msg in history[-4:] if msg["role"] == "assistant"]
         if last_exchanges:
             query = f"{query} (This is a follow-up to: {last_exchanges[-1]['content']})"
     
-    # Embed the query and search Pinecone
     query_vector = embeddings.embed_query(query)
     search_params = {"vector": query_vector, "top_k": 10, "include_metadata": True}
     if filter:
@@ -348,12 +337,11 @@ def retrieve_context(state: CustomerState) -> CustomerState:
     return state
 
 def generate_response(state: CustomerState) -> CustomerState:
-    # Format conversation history for prompt
     formatted_history = ""
     if state.conversation_history:
         formatted_history = "\n".join([
             f"{msg['role'].upper()}: {msg['content']}" 
-            for msg in state.conversation_history[-6:]  # Include last 6 messages
+            for msg in state.conversation_history[-6:]
         ])
     
     response = customer_chain.invoke(
@@ -379,175 +367,381 @@ customer_workflow.add_edge("retrieve", "respond")
 customer_workflow.add_edge("respond", END)
 customer_graph = customer_workflow.compile()
 
-# Tenant update state
-class TenantUpdateState(PydanticBaseModel):
+class TenantState(BaseModel):
+    """State for tenant conversation flow"""
     query: str
     user_id: str
-    language: str
+    language: str = "en"
     session_id: str
     conversation_history: List[Dict[str, str]] = []
-    intent: Optional[str] = None
-    data: Dict[str, Any] = {}
+    entity_type: Optional[str] = None  # e.g., offer, product
+    action: Optional[str] = None      # e.g., create, update, delete, list
+    collected_data: Dict[str, Any] = {}  # Natural language details (e.g., description)
+    current_step: Optional[str] = None   # Tracks what we’re asking for (e.g., store, description)
+    store_name: Optional[str] = None     # Store name, not ID
     response: Optional[str] = None
 
-# Tenant workflow nodes
-def recognize_intent(state: TenantUpdateState) -> TenantUpdateState:
-    # Check conversation history for context
-    history = state.conversation_history
-    query = state.query
+intent_prompt = PromptTemplate(
+    input_variables=["query", "conversation_history"],
+    template="""
+    You are CenomiAI's tenant assistant. Parse this query to understand what the tenant wants to do.
     
-    # If this is a follow-up question, add context from previous interactions
-    if history and any(word in query.lower() for word in ["it", "this", "that", "them", "those"]):
-        last_exchanges = [msg for msg in history[-4:]]
-        if last_exchanges:
-            context_messages = " ".join([msg["content"] for msg in last_exchanges])
-            query = f"{query} (Based on previous context: {context_messages})"
+    Valid entities: store, offer, product
+    Valid actions: create, update, delete, list
     
-    prompt = f"""
-    You are CenomiAI, a tenant assistant. Parse the query into a JSON object for store/offer/product management:
-    - Actions: 'read_store', 'add_offer', 'update_offer', 'delete_offer', 'update_store', 'update_product'
-    - Include 'store', 'description', 'start_date', 'end_date', 'field', 'value' as needed.
     Query: "{query}"
-    Return JSON wrapped in ```json``` markers.
+    
+    Previous conversation:
+    {conversation_history}
+    
+    Return a JSON object with:
+    - entity_type: What they’re working with (store, offer, product)
+    - action: What they want to do (create, update, delete, list)
+    - collected_data: Any details they’ve provided (e.g., "description": "20% off summer sale", "store": "Fashion Hub")
+    
+    Use context from the conversation history to resolve vague terms like "it" or "that." If a store, offer, or product is mentioned vaguely, infer it from the history.
+    Return only valid JSON in triple backticks.
     """
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    response = model.generate_content(prompt).text.strip()
-    json_str = response.split("```json")[1].split("```")[0].strip()
-    parsed = json.loads(json_str)
-    state.intent = parsed.get("action", "general_query")
-    state.data.update(parsed)
+)
+
+def analyze_intent(state: TenantState) -> TenantState:
+    formatted_history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state.conversation_history[-4:]])
+    intent_chain = intent_prompt | llm | StrOutputParser()
+    intent_result = intent_chain.invoke({"query": state.query, "conversation_history": formatted_history})
+    start = intent_result.find("```json") + 7
+    end = intent_result.rfind("```")
+    intent_data = json.loads(intent_result[start:end].strip())
+    
+    state.entity_type = intent_data.get("entity_type")
+    state.action = intent_data.get("action")
+    state.collected_data.update(intent_data.get("collected_data", {}))
+    
+    # Infer store automatically
+    user_stores = db_fetch_all("SELECT name_en FROM stores WHERE tenant_id = %s", (state.user_id,))
+    if "store" in state.collected_data:
+        state.store_name = state.collected_data["store"]
+    elif len(user_stores) == 1:
+        state.store_name = user_stores[0]["name_en"]
+    elif len(user_stores) > 1 and not state.store_name:
+        state.current_step = "select_store"
+    
     return state
 
-def process_update(state: TenantUpdateState) -> TenantUpdateState:
-    stores = db_fetch_all("SELECT store_id, name_en FROM stores WHERE tenant_id = %s", (state.user_id,))
-    store_name = state.data.get("store")
-    store = next((s for s in stores if s["name_en"].lower() == store_name.lower()), None) if store_name else None
+def prompt_for_missing_info(state: TenantState) -> TenantState:
+    user_stores = db_fetch_all("SELECT name_en FROM stores WHERE tenant_id = %s", (state.user_id,))
     
-    if not store and "store" not in state.data:
-        state.response = f"Please specify a store: {', '.join(s['name_en'] for s in stores)}."
+    # Step 1: Handle store selection
+    if state.current_step == "select_store" or (len(user_stores) > 1 and not state.store_name):
+        if not user_stores:
+            state.response = "Looks like you don’t have any stores yet. Contact mall management to get started!"
+            return state
+        store_list = "\n".join([f"- {store['name_en']}" for store in user_stores])
+        state.response = f"Hi! You’ve got a few stores. Which one should I use for this?\n{store_list}\nJust tell me the name!"
+        state.current_step = "select_store"
         return state
     
-    if store:
-        state.data["store_id"] = store["store_id"]
-        state.data["store_name"] = store["name_en"]
-
-    if state.intent == "add_offer":
-        desc = state.data.get("description")
-        if not desc:
-            state.response = "Please provide an offer description (e.g., '20% off laptops')."
-            return state
-        start_date = state.data.get("start_date", "CURRENT_DATE")
-        end_date = state.data.get("end_date", "CURRENT_DATE + INTERVAL '7 days'")
-        db_execute(
-            "INSERT INTO offers (store_id, description_en, description_ar, start_date, end_date) VALUES (%s, %s, %s, %s, %s)",
-            (state.data["store_id"], desc, desc, start_date, end_date)
-        )
-        offer_id = db_fetch_one("SELECT currval(pg_get_serial_sequence('offers', 'offer_id')) AS id")["id"]
-        text = desc
-        vector = embeddings.embed_query(text)
-        index.upsert(vectors=[
-            {"id": f"offer_{offer_id}_en", "values": vector, "metadata": {
-                "type": "offer", "id": offer_id, "description_en": desc, "lang": "en"
-            }}
-        ])
-        state.response = f"Added '{desc}' to {state.data['store_name']}!"
-
-    elif state.intent == "update_offer":
-        offers = db_fetch_all("SELECT offer_id, description_en FROM offers WHERE store_id = %s", (state.data["store_id"],))
-        offer = next((o for o in offers if state.data.get("description", "").lower() in o["description_en"].lower()), None)
-        if not offer:
-            state.response = f"No offer found matching '{state.data.get('description')}'."
-        else:
-            value = state.data.get("value")
-            db_execute(
-                "UPDATE offers SET description_en = %s, description_ar = %s WHERE offer_id = %s",
-                (value, value, offer["offer_id"])
+    # Step 2: Collect entity details
+    if state.entity_type == "offer":
+        if state.action == "create":
+            if "description" not in state.collected_data:
+                state.response = "Awesome! What’s this offer about? (e.g., '20% off summer clothes')"
+                state.current_step = "description"
+            elif "start_date" not in state.collected_data:
+                state.response = "When should this offer start? You can say 'today' or something like '2025-04-01'."
+                state.current_step = "start_date"
+            elif "end_date" not in state.collected_data:
+                state.response = "And when should it end? (e.g., '2025-04-30')"
+                state.current_step = "end_date"
+            else:
+                execute_operation(state)
+        elif state.action == "update":
+            if "description" not in state.collected_data:
+                offers = db_fetch_all(
+                    "SELECT description_en FROM offers WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
+                    (state.store_name, state.user_id)
+                )
+                offer_list = "\n".join([f"- {o['description_en']}" for o in offers]) if offers else "None yet!"
+                state.response = f"Which offer do you want to change in {state.store_name}?\n{offer_list}\nTell me the one you mean!"
+                state.current_step = "description"
+            elif "new_description" not in state.collected_data:
+                state.response = f"Okay, updating '{state.collected_data['description']}'. What should the new offer say?"
+                state.current_step = "new_description"
+            else:
+                execute_operation(state)
+        elif state.action == "delete":
+            if "description" not in state.collected_data:
+                offers = db_fetch_all(
+                    "SELECT description_en FROM offers WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
+                    (state.store_name, state.user_id)
+                )
+                offer_list = "\n".join([f"- {o['description_en']}" for o in offers]) if offers else "None yet!"
+                state.response = f"Which offer should I remove from {state.store_name}?\n{offer_list}\nJust say the one you want gone!"
+                state.current_step = "description"
+            else:
+                execute_operation(state)
+        elif state.action == "list":
+            offers = db_fetch_all(
+                "SELECT description_en, start_date, end_date FROM offers WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
+                (state.store_name, state.user_id)
             )
-            text = value
-            vector = embeddings.embed_query(text)
-            index.upsert(vectors=[
-                {"id": f"offer_{offer['offer_id']}_en", "values": vector, "metadata": {
-                    "type": "offer", "id": offer["offer_id"], "description_en": value, "lang": "en"
-                }}
-            ])
-            state.response = f"Updated offer to '{value}'!"
-
-    elif state.intent == "delete_offer":
-        offers = db_fetch_all("SELECT offer_id, description_en FROM offers WHERE store_id = %s", (state.data["store_id"],))
-        offer = next((o for o in offers if state.data.get("description", "").lower() in o["description_en"].lower()), None)
-        if not offer:
-            state.response = f"No offer found matching '{state.data.get('description')}'."
-        else:
-            db_execute("DELETE FROM offers WHERE offer_id = %s", (offer["offer_id"],))
-            index.delete(ids=[f"offer_{offer['offer_id']}_en"])
-            state.response = f"Deleted offer '{offer['description_en']}'!"
+            if not offers:
+                state.response = f"You don’t have any offers in {state.store_name} yet. Want to add one?"
+            else:
+                offer_list = "\n".join([f"- {o['description_en']} (Valid: {o['start_date']} to {o['end_date']})" for o in offers])
+                state.response = f"Here are your offers for {state.store_name}:\n{offer_list}"
     
-    elif state.intent == "read_store":
-        # Get store details for reference
-        store_details = db_fetch_one(
-            "SELECT s.*, m.name_en as mall_name FROM stores s "
-            "JOIN malls m ON s.mall_id = m.mall_id "
-            "WHERE s.store_id = %s", 
-            (state.data["store_id"],)
-        )
-        offers = db_fetch_all(
-            "SELECT * FROM offers WHERE store_id = %s AND end_date >= CURRENT_DATE",
-            (state.data["store_id"],)
-        )
-        state.response = f"Store: {store_details['name_en']} in {store_details['mall_name']}\n\nActive offers: " + \
-            (', '.join([o['description_en'] for o in offers]) if offers else "None")
-    
-    else:
-        state.response = "I'm not sure what you want to do. You can add, update, or delete offers for your stores."
+    elif state.entity_type == "product":
+        if state.action == "create":
+            if "name" not in state.collected_data:
+                state.response = "Cool! What’s the product called? (e.g., 'Blue T-Shirt')"
+                state.current_step = "name"
+            elif "description" not in state.collected_data:
+                state.response = f"Nice! What’s '{state.collected_data['name']}' about? (e.g., 'Cotton, size M')"
+                state.current_step = "description"
+            elif "price" not in state.collected_data:
+                state.response = "How much does it cost? (e.g., '50')"
+                state.current_step = "price"
+            elif "currency" not in state.collected_data:
+                state.response = "What currency? (e.g., 'SAR' or 'USD')"
+                state.current_step = "currency"
+            else:
+                execute_operation(state)
+        elif state.action == "update":
+            if "name" not in state.collected_data:
+                products = db_fetch_all(
+                    "SELECT name_en FROM products WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
+                    (state.store_name, state.user_id)
+                )
+                product_list = "\n".join([f"- {p['name_en']}" for p in products]) if products else "None yet!"
+                state.response = f"Which product do you want to change in {state.store_name}?\n{product_list}\nTell me the name!"
+                state.current_step = "name"
+            elif "new_description" not in state.collected_data:
+                state.response = f"Okay, updating '{state.collected_data['name']}'. What should the new description be?"
+                state.current_step = "new_description"
+            else:
+                execute_operation(state)
+        elif state.action == "delete":
+            if "name" not in state.collected_data:
+                products = db_fetch_all(
+                    "SELECT name_en FROM products WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
+                    (state.store_name, state.user_id)
+                )
+                product_list = "\n".join([f"- {p['name_en']}" for p in products]) if products else "None yet!"
+                state.response = f"Which product should I remove from {state.store_name}?\n{product_list}\nJust say the name!"
+                state.current_step = "name"
+            else:
+                execute_operation(state)
+        elif state.action == "list":
+            products = db_fetch_all(
+                "SELECT name_en, description_en, price, currency FROM products WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
+                (state.store_name, state.user_id)
+            )
+            if not products:
+                state.response = f"You don’t have any products in {state.store_name} yet. Want to add one?"
+            else:
+                product_list = "\n".join([f"- {p['name_en']}: {p['description_en']} ({p['price']} {p['currency']})" for p in products])
+                state.response = f"Here are your products for {state.store_name}:\n{product_list}"
     
     return state
 
-# Tenant workflow
-tenant_workflow = StateGraph(TenantUpdateState)
-tenant_workflow.add_node("recognize_intent", recognize_intent)
-tenant_workflow.add_node("process", process_update)
-tenant_workflow.set_entry_point("recognize_intent")
-tenant_workflow.add_edge("recognize_intent", "process")
+def process_input(state: TenantState) -> TenantState:
+    if not state.current_step:
+        return analyze_intent(state)
+    
+    if state.current_step == "select_store":
+        user_stores = db_fetch_all("SELECT name_en FROM stores WHERE tenant_id = %s", (state.user_id,))
+        store_name = state.query.strip().lower()
+        matching_store = next((s for s in user_stores if s["name_en"].lower() == store_name), None)
+        if matching_store:
+            state.store_name = matching_store["name_en"]
+            state.current_step = None
+        else:
+            store_list = "\n".join([f"- {s['name_en']}" for s in user_stores])
+            state.response = f"Hmm, I didn’t find that store. Pick one of yours:\n{store_list}"
+            return state
+    
+    elif state.current_step in ["description", "new_description", "start_date", "end_date", "name", "price", "currency"]:
+        state.collected_data[state.current_step] = state.query.strip()
+        state.current_step = None
+    
+    return prompt_for_missing_info(state)
+
+def execute_operation(state: TenantState) -> None:
+    store_id = db_fetch_one(
+        "SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s",
+        (state.store_name, state.user_id)
+    )["store_id"]
+    
+    if state.entity_type == "offer":
+        if state.action == "create":
+            description = state.collected_data["description"]
+            start_date = state.collected_data["start_date"] if state.collected_data["start_date"] != "today" else datetime.now().strftime("%Y-%m-%d")
+            end_date = state.collected_data["end_date"]
+            db_execute(
+                "INSERT INTO offers (store_id, description_en, description_ar, start_date, end_date) VALUES (%s, %s, %s, %s, %s)",
+                (store_id, description, description, start_date, end_date)
+            )
+            offer_id = db_fetch_one("SELECT currval(pg_get_serial_sequence('offers', 'offer_id')) AS id")["id"]
+            vector = embeddings.embed_query(description)
+            index.upsert(vectors=[{
+                "id": f"offer_{offer_id}_en",
+                "values": vector,
+                "metadata": {"type": "offer", "id": offer_id, "description_en": description, "lang": "en"}
+            }])
+            state.response = f"Done! Added '{description}' to {state.store_name} from {start_date} to {end_date}. Anything else you’d like to do? 😊"
+        elif state.action == "update":
+            old_desc = state.collected_data["description"]
+            new_desc = state.collected_data["new_description"]
+            db_execute(
+                "UPDATE offers SET description_en = %s, description_ar = %s WHERE store_id = %s AND description_en = %s",
+                (new_desc, new_desc, store_id, old_desc)
+            )
+            offer_id = db_fetch_one(
+                "SELECT offer_id FROM offers WHERE store_id = %s AND description_en = %s",
+                (store_id, new_desc)
+            )["offer_id"]
+            vector = embeddings.embed_query(new_desc)
+            index.upsert(vectors=[{
+                "id": f"offer_{offer_id}_en",
+                "values": vector,
+                "metadata": {"type": "offer", "id": offer_id, "description_en": new_desc, "lang": "en"}
+            }])
+            state.response = f"Updated! '{old_desc}' is now '{new_desc}' in {state.store_name}."
+        elif state.action == "delete":
+            description = state.collected_data["description"]
+            offer = db_fetch_one(
+                "SELECT offer_id FROM offers WHERE store_id = %s AND description_en = %s",
+                (store_id, description)
+            )
+            if offer:
+                offer_id = offer["offer_id"]
+                db_execute("DELETE FROM offers WHERE store_id = %s AND description_en = %s", (store_id, description))
+                index.delete(ids=[f"offer_{offer_id}_en"])
+                state.response = f"Poof! '{description}' is gone from {state.store_name}."
+            else:
+                state.response = f"I couldn’t find '{description}' in {state.store_name}. Want to list your offers to check?"
+    
+    elif state.entity_type == "product":
+        if state.action == "create":
+            name = state.collected_data["name"]
+            description = state.collected_data["description"]
+            price = state.collected_data["price"]
+            currency = state.collected_data.get("currency", "SAR")
+            db_execute(
+                "INSERT INTO products (store_id, name_en, name_ar, description_en, description_ar, price, currency) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (store_id, name, name, description, description, price, currency)
+            )
+            product_id = db_fetch_one("SELECT currval(pg_get_serial_sequence('products', 'product_id')) AS id")["id"]
+            vector = embeddings.embed_query(f"{name} {description}")
+            index.upsert(vectors=[{
+                "id": f"product_{product_id}_en",
+                "values": vector,
+                "metadata": {"type": "product", "id": product_id, "name_en": name, "description_en": description, "price": price, "currency": currency, "lang": "en"}
+            }])
+            state.response = f"Done! Added '{name}' ({description}) to {state.store_name} for {price} {currency}. Anything else? 😊"
+        elif state.action == "update":
+            name = state.collected_data["name"]
+            new_desc = state.collected_data["new_description"]
+            db_execute(
+                "UPDATE products SET description_en = %s, description_ar = %s WHERE store_id = %s AND name_en = %s",
+                (new_desc, new_desc, store_id, name)
+            )
+            product = db_fetch_one(
+                "SELECT product_id FROM products WHERE store_id = %s AND name_en = %s",
+                (store_id, name)
+            )
+            product_id = product["product_id"]
+            vector = embeddings.embed_query(f"{name} {new_desc}")
+            index.upsert(vectors=[{
+                "id": f"product_{product_id}_en",
+                "values": vector,
+                "metadata": {"type": "product", "id": product_id, "name_en": name, "description_en": new_desc, "lang": "en"}
+            }])
+            state.response = f"Updated! '{name}' now has description '{new_desc}' in {state.store_name}."
+        elif state.action == "delete":
+            name = state.collected_data["name"]
+            product = db_fetch_one(
+                "SELECT product_id FROM products WHERE store_id = %s AND name_en = %s",
+                (store_id, name)
+            )
+            if product:
+                product_id = product["product_id"]
+                db_execute("DELETE FROM products WHERE store_id = %s AND name_en = %s", (store_id, name))
+                index.delete(ids=[f"product_{product_id}_en"])
+                state.response = f"Poof! '{name}' is gone from {state.store_name}."
+            else:
+                state.response = f"I couldn’t find '{name}' in {state.store_name}. Want to list your products to check?"
+    
+    # Reset state
+    state.entity_type = None
+    state.action = None
+    state.collected_data = {}
+    state.current_step = None
+
+tenant_prompt = PromptTemplate(
+    input_variables=["message", "conversation_history", "entity_type", "action"],
+    template="""
+    You are CenomiAI, a helpful assistant for mall tenants. Format the following system message into a natural, conversational response:
+    
+    System message: {message}
+    
+    Current context:
+    - Entity: {entity_type}
+    - Action: {action}
+    
+    Previous conversation:
+    {conversation_history}
+    
+    Make the response friendly and professional. Use emoji occasionally to add warmth. Focus on helping the tenant manage their store information efficiently.
+    """
+)
+
+def tenant_recognize_intent(state: TenantState) -> TenantState:
+    conversation_history = get_conversation_history(state.session_id)
+    state.conversation_history = [{"role": msg.role, "content": msg.content} for msg in conversation_history]
+    
+    if not state.current_step:
+        state = analyze_intent(state)
+        state = prompt_for_missing_info(state)
+    else:
+        state = process_input(state)
+    
+    if state.response:
+        tenant_chain = tenant_prompt | llm | StrOutputParser()
+        formatted_history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state.conversation_history[-4:]])
+        state.response = tenant_chain.invoke({
+            "message": state.response,
+            "conversation_history": formatted_history,
+            "entity_type": state.entity_type or "unknown",
+            "action": state.action or "unknown"
+        })
+    else:
+        state.response = "I’m not sure what you want to do. You can add, update, or remove offers or products—just let me know!"
+    return state
+
+tenant_workflow = StateGraph(TenantState)
+tenant_workflow.add_node("process", tenant_recognize_intent)
+tenant_workflow.set_entry_point("process")
 tenant_workflow.add_edge("process", END)
 tenant_graph = tenant_workflow.compile()
 
-# Endpoints
 @app.post("/login")
 async def login(request: LoginRequest):
-    tenant = db_fetch_one(
-        "SELECT tenant_id, email, password FROM tenants WHERE email ILIKE %s",
-        (request.email,)
-    )
-    if not tenant or tenant["password"] != request.password:  # Use hashing in production
+    tenant = db_fetch_one("SELECT tenant_id, email, password FROM tenants WHERE email ILIKE %s", (request.email,))
+    if not tenant or tenant["password"] != request.password:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     return {"user_id": str(tenant["tenant_id"]), "role": "tenant"}
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    # Detect language if not provided
     lang = request.language or detect_language(request.text)
-    
-    # Get or create session
     session_id = get_or_create_session(request.session_id, request.user_id, lang)
-    
-    # Get conversation history
     conversation_history = get_conversation_history(session_id)
     history_dicts = [{"role": msg.role, "content": msg.content} for msg in conversation_history]
-    
-    # Process the query
-    state = CustomerState(
-        query=request.text, 
-        user_id=request.user_id, 
-        language=lang,
-        session_id=session_id,
-        conversation_history=history_dicts
-    )
+    state = CustomerState(query=request.text, user_id=request.user_id, language=lang, session_id=session_id, conversation_history=history_dicts)
     result = customer_graph.invoke(state)
-    
-    # Save the conversation messages
     add_message_to_conversation(session_id, "user", request.text)
     add_message_to_conversation(session_id, "assistant", result["response"])
-    
     return ChatResponse(message=result["response"], session_id=session_id)
 
 @app.post("/tenant/update")
@@ -556,27 +750,30 @@ async def tenant_update(request: UpdateRequest):
     if not tenant:
         raise HTTPException(status_code=403, detail="Only tenants can update")
     
-    # Detect language if not provided
     lang = request.language or "en"
-    
-    # Get or create session
     session_id = get_or_create_session(request.session_id, request.user_id, lang)
     
-    # Get conversation history
-    conversation_history = get_conversation_history(session_id)
-    history_dicts = [{"role": msg.role, "content": msg.content} for msg in conversation_history]
+    conv_state = db_fetch_one("SELECT current_state FROM conversations WHERE session_id = %s", (session_id,))
+    history = get_conversation_history(session_id)
+    history_dicts = [{"role": msg.role, "content": msg.content} for msg in history]
     
-    # Process the query
-    state = TenantUpdateState(
-        query=request.text, 
-        user_id=request.user_id, 
-        language=lang,
-        session_id=session_id,
-        conversation_history=history_dicts
-    )
+    if conv_state and conv_state.get("current_state"):
+        try:
+            state_dict = conv_state["current_state"]
+            state = TenantState(**state_dict)
+            state.query = request.text
+            state.conversation_history = history_dicts
+        except (json.JSONDecodeError, ValueError):
+            logger.error(f"Invalid state data for session {session_id}, resetting to new state")
+            state = TenantState(query=request.text, user_id=request.user_id, language=lang, session_id=session_id, conversation_history=history_dicts)
+    else:
+        state = TenantState(query=request.text, user_id=request.user_id, language=lang, session_id=session_id, conversation_history=history_dicts) 
+
     result = tenant_graph.invoke(state)
     
-    # Save the conversation messages
+    state_json = json.dumps(result)
+    db_execute("UPDATE conversations SET current_state = %s WHERE session_id = %s", (state_json, session_id))
+    
     add_message_to_conversation(session_id, "user", request.text)
     add_message_to_conversation(session_id, "assistant", result["response"])
     
@@ -585,4 +782,3 @@ async def tenant_update(request: UpdateRequest):
 @app.get("/")
 async def root():
     return {"message": "Cenomi Chatbot with Gemini is up and running!"}
-
