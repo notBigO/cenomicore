@@ -3,7 +3,7 @@ from pinecone import Pinecone
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from pydantic import BaseModel
 import google.generativeai as genai
 import psycopg2
@@ -18,6 +18,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, END
 from pydantic import BaseModel as PydanticBaseModel
 from langdetect import detect
+import uuid
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -58,22 +59,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Request models
+
+class Message(BaseModel):
+    role: str
+    content: str
+    timestamp: Optional[datetime] = None
+
 class ChatRequest(BaseModel):
     text: str
     user_id: Optional[str] = None
     language: Optional[str] = None
+    session_id: Optional[str] = None
+
+class ChatResponse(BaseModel):
+    message: str
+    session_id: str
 
 class UpdateRequest(BaseModel):
     text: str
     user_id: str
     language: Optional[str] = None
+    session_id: Optional[str] = None
 
 class LoginRequest(BaseModel):
     email: str
     password: str
 
-# Database helper functions
+
 def db_fetch_one(query: str, params: tuple = ()):
     try:
         conn = psycopg2.connect(**DB_CONFIG)
@@ -110,8 +122,10 @@ def db_execute(query: str, params: tuple = ()):
         conn.commit()
         cur.close()
         conn.close()
+        return True
     except Exception as e:
         logger.error(f"Database error: {e}")
+        return False
 
 def convert_to_json_safe(data):
     if isinstance(data, list):
@@ -123,20 +137,55 @@ def convert_to_json_safe(data):
     else:
         return data
 
-# Language detection
 def detect_language(text: str) -> str:
     try:
         return detect(text)
     except Exception:
         return "en"
 
+# Conversation memory functions
+def get_or_create_session(session_id: Optional[str], user_id: Optional[str], language: str) -> str:
+    if session_id:
+        # Update the session's last activity time
+        db_execute(
+            "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE session_id = %s",
+            (session_id,)
+        )
+        return session_id
+    else:
+        # Create a new session
+        new_session_id = str(uuid.uuid4())
+        db_execute(
+            "INSERT INTO conversations (session_id, user_id, language) VALUES (%s, %s, %s)",
+            (new_session_id, user_id, language)
+        )
+        return new_session_id
+
+def add_message_to_conversation(session_id: str, role: str, content: str):
+    db_execute(
+        "INSERT INTO conversation_messages (session_id, role, content) VALUES (%s, %s, %s)",
+        (session_id, role, content)
+    )
+
+def get_conversation_history(session_id: str, max_messages: int = 10) -> List[Message]:
+    messages = db_fetch_all(
+        "SELECT role, content, timestamp FROM conversation_messages "
+        "WHERE session_id = %s ORDER BY timestamp DESC LIMIT %s",
+        (session_id, max_messages)
+    )
+    # Return in chronological order
+    return [
+        Message(role=msg["role"], content=msg["content"], timestamp=msg["timestamp"])
+        for msg in reversed(messages)
+    ]
+
 # Customer prompt template
 customer_prompt = PromptTemplate(
-    input_variables=["context", "query", "lang"],
+    input_variables=["context", "query", "lang", "conversation_history"],
     template="""
     You are CenomiAI, a friendly and knowledgeable mall assistant. Respond conversationally in {lang}, using emojis 😊 to maintain a warm and engaging tone. 
     Your purpose is to assist customers with all mall-related inquiries, including stores, events, offers, loyalty programs, services, dining, navigation, and more. 
-    Use the provided query and context to deliver accurate, detailed, and helpful responses. If the context lacks sufficient information, ask clarifying questions or offer further assistance while keeping the tone supportive.
+    Use the provided query, context, and conversation history to deliver accurate, detailed, and helpful responses. If the context lacks sufficient information, ask clarifying questions or offer further assistance while keeping the tone supportive.
 
     ### Key Guidelines for Responses:
     - **Store-Specific Queries**: 
@@ -153,7 +202,7 @@ customer_prompt = PromptTemplate(
 
     - **Events**: 
       - Provide information on past, current, and upcoming events, including names, dates, times, locations, and descriptions.
-      - Address queries about specific event types (e.g., workshops, kids’ activities) or seasonal festivities.
+      - Address queries about specific event types (e.g., workshops, kids' activities) or seasonal festivities.
 
     - **Mall Navigation and Amenities**: 
       - Offer clear directions to amenities (e.g., restrooms, ATMs, prayer rooms) or key areas (e.g., food court, parking).
@@ -182,19 +231,24 @@ customer_prompt = PromptTemplate(
       - Provide information on mall hours, peak times, holiday schedules, or late-night shopping when requested.
 
     - **Open-Ended or Vague Queries**: 
-      - For queries like "What’s good here?", ask follow-up questions (e.g., "Are you looking for shopping, dining, or entertainment?") or offer a broad range of popular options.
+      - For queries like "What's good here?", ask follow-up questions (e.g., "Are you looking for shopping, dining, or entertainment?") or offer a broad range of popular options.
 
     ### Instructions:
     - **Context Usage**: If the context contains relevant information, use it directly to craft your response. Quote specifics (e.g., store locations, event times) when possible.
-    - **Insufficient Context**: If the context is empty or lacks details, respond with, "I couldn’t find that info right now 😞, but I’ll keep looking! Can you give me more details to help me assist you better?"
+    - **Conversation History**: Use the conversation history to maintain context. Reference previous questions and your answers when appropriate.
+    - **Insufficient Context**: If the context is empty or lacks details, respond with, "I couldn't find that info right now 😞, but I'll keep looking! Can you give me more details to help me assist you better?"
     - **Tone**: Keep responses conversational, concise yet detailed, and customer-focused. Avoid technical jargon unless necessary.
     - **Read-Only**: This is a READ-ONLY chat. Do not offer to update information or suggest actions beyond providing assistance based on existing data.
+    - **Continuity**: If the user is following up on a previous question with pronouns like "it", "they", "that store", etc., use conversation history to understand what they're referring to.
 
-    ### Query:
+    ### Current Query:
     "{query}"
 
     ### Context:
     {context}
+    
+    ### Conversation History:
+    {conversation_history}
     """
 )
 
@@ -207,7 +261,10 @@ class CustomerState(PydanticBaseModel):
     query: str
     user_id: Optional[str] = None
     language: str
+    session_id: str
+    conversation_history: List[Dict[str, str]] = []
     response: Optional[str] = None
+    context_data: Optional[Dict[str, Any]] = None
 
 # Customer workflow nodes
 def retrieve_context(state: CustomerState) -> CustomerState:
@@ -221,8 +278,19 @@ def retrieve_context(state: CustomerState) -> CustomerState:
         if mall:
             filter = {"mall_id": mall["mall_id"]}
     
+    # Check conversation history for entity references
+    query = state.query
+    history = state.conversation_history
+    
+    # Example of resolving references from history
+    if history and any(word in query.lower() for word in ["it", "they", "that", "this", "there", "those"]):
+        # Use the last assistant message as context
+        last_exchanges = [msg for msg in history[-4:] if msg["role"] == "assistant"]
+        if last_exchanges:
+            query = f"{query} (This is a follow-up to: {last_exchanges[-1]['content']})"
+    
     # Embed the query and search Pinecone
-    query_vector = embeddings.embed_query(state.query)
+    query_vector = embeddings.embed_query(query)
     search_params = {"vector": query_vector, "top_k": 10, "include_metadata": True}
     if filter:
         search_params["filter"] = filter
@@ -275,15 +343,25 @@ def retrieve_context(state: CustomerState) -> CustomerState:
         )
         context["customer_loyalty"] = loyalty or {}
     
+    state.context_data = context
     state.response = json.dumps(convert_to_json_safe(context))
     return state
 
 def generate_response(state: CustomerState) -> CustomerState:
+    # Format conversation history for prompt
+    formatted_history = ""
+    if state.conversation_history:
+        formatted_history = "\n".join([
+            f"{msg['role'].upper()}: {msg['content']}" 
+            for msg in state.conversation_history[-6:]  # Include last 6 messages
+        ])
+    
     response = customer_chain.invoke(
         {
             "context": state.response,
             "query": state.query,
             "lang": state.language,
+            "conversation_history": formatted_history,
             "current_date": datetime.now().strftime("%Y-%m-%d")
         }
     )
@@ -306,17 +384,30 @@ class TenantUpdateState(PydanticBaseModel):
     query: str
     user_id: str
     language: str
+    session_id: str
+    conversation_history: List[Dict[str, str]] = []
     intent: Optional[str] = None
     data: Dict[str, Any] = {}
     response: Optional[str] = None
 
 # Tenant workflow nodes
 def recognize_intent(state: TenantUpdateState) -> TenantUpdateState:
+    # Check conversation history for context
+    history = state.conversation_history
+    query = state.query
+    
+    # If this is a follow-up question, add context from previous interactions
+    if history and any(word in query.lower() for word in ["it", "this", "that", "them", "those"]):
+        last_exchanges = [msg for msg in history[-4:]]
+        if last_exchanges:
+            context_messages = " ".join([msg["content"] for msg in last_exchanges])
+            query = f"{query} (Based on previous context: {context_messages})"
+    
     prompt = f"""
     You are CenomiAI, a tenant assistant. Parse the query into a JSON object for store/offer/product management:
     - Actions: 'read_store', 'add_offer', 'update_offer', 'delete_offer', 'update_store', 'update_product'
     - Include 'store', 'description', 'start_date', 'end_date', 'field', 'value' as needed.
-    Query: "{state.query}"
+    Query: "{query}"
     Return JSON wrapped in ```json``` markers.
     """
     model = genai.GenerativeModel('gemini-1.5-flash')
@@ -335,8 +426,10 @@ def process_update(state: TenantUpdateState) -> TenantUpdateState:
     if not store and "store" not in state.data:
         state.response = f"Please specify a store: {', '.join(s['name_en'] for s in stores)}."
         return state
-    state.data["store_id"] = store["store_id"]
-    state.data["store_name"] = store["name_en"]
+    
+    if store:
+        state.data["store_id"] = store["store_id"]
+        state.data["store_name"] = store["name_en"]
 
     if state.intent == "add_offer":
         desc = state.data.get("description")
@@ -389,6 +482,24 @@ def process_update(state: TenantUpdateState) -> TenantUpdateState:
             index.delete(ids=[f"offer_{offer['offer_id']}_en"])
             state.response = f"Deleted offer '{offer['description_en']}'!"
     
+    elif state.intent == "read_store":
+        # Get store details for reference
+        store_details = db_fetch_one(
+            "SELECT s.*, m.name_en as mall_name FROM stores s "
+            "JOIN malls m ON s.mall_id = m.mall_id "
+            "WHERE s.store_id = %s", 
+            (state.data["store_id"],)
+        )
+        offers = db_fetch_all(
+            "SELECT * FROM offers WHERE store_id = %s AND end_date >= CURRENT_DATE",
+            (state.data["store_id"],)
+        )
+        state.response = f"Store: {store_details['name_en']} in {store_details['mall_name']}\n\nActive offers: " + \
+            (', '.join([o['description_en'] for o in offers]) if offers else "None")
+    
+    else:
+        state.response = "I'm not sure what you want to do. You can add, update, or delete offers for your stores."
+    
     return state
 
 # Tenant workflow
@@ -411,23 +522,67 @@ async def login(request: LoginRequest):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     return {"user_id": str(tenant["tenant_id"]), "role": "tenant"}
 
-@app.post("/chat")
+@app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
+    # Detect language if not provided
     lang = request.language or detect_language(request.text)
-    state = CustomerState(query=request.text, user_id=request.user_id, language=lang)
+    
+    # Get or create session
+    session_id = get_or_create_session(request.session_id, request.user_id, lang)
+    
+    # Get conversation history
+    conversation_history = get_conversation_history(session_id)
+    history_dicts = [{"role": msg.role, "content": msg.content} for msg in conversation_history]
+    
+    # Process the query
+    state = CustomerState(
+        query=request.text, 
+        user_id=request.user_id, 
+        language=lang,
+        session_id=session_id,
+        conversation_history=history_dicts
+    )
     result = customer_graph.invoke(state)
-    return {"message": result["response"]}
+    
+    # Save the conversation messages
+    add_message_to_conversation(session_id, "user", request.text)
+    add_message_to_conversation(session_id, "assistant", result["response"])
+    
+    return ChatResponse(message=result["response"], session_id=session_id)
 
 @app.post("/tenant/update")
 async def tenant_update(request: UpdateRequest):
     tenant = db_fetch_one("SELECT tenant_id FROM tenants WHERE tenant_id = %s", (request.user_id,))
     if not tenant:
         raise HTTPException(status_code=403, detail="Only tenants can update")
+    
+    # Detect language if not provided
     lang = request.language or "en"
-    state = TenantUpdateState(query=request.text, user_id=request.user_id, language=lang)
+    
+    # Get or create session
+    session_id = get_or_create_session(request.session_id, request.user_id, lang)
+    
+    # Get conversation history
+    conversation_history = get_conversation_history(session_id)
+    history_dicts = [{"role": msg.role, "content": msg.content} for msg in conversation_history]
+    
+    # Process the query
+    state = TenantUpdateState(
+        query=request.text, 
+        user_id=request.user_id, 
+        language=lang,
+        session_id=session_id,
+        conversation_history=history_dicts
+    )
     result = tenant_graph.invoke(state)
-    return {"message": result["response"]}
+    
+    # Save the conversation messages
+    add_message_to_conversation(session_id, "user", request.text)
+    add_message_to_conversation(session_id, "assistant", result["response"])
+    
+    return {"message": result["response"], "session_id": session_id}
 
 @app.get("/")
 async def root():
     return {"message": "Cenomi Chatbot with Gemini is up and running!"}
+
