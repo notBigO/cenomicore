@@ -59,6 +59,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class DateTimeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
 class Message(BaseModel):
     role: str
     content: str
@@ -90,13 +96,16 @@ def db_fetch_one(query: str, params: tuple = ()):
         cur = conn.cursor()
         cur.execute(query, params)
         row = cur.fetchone()
+        if not row:
+            return None
         columns = [desc[0] for desc in cur.description]
-        cur.close()
-        conn.close()
-        return dict(zip(columns, row)) if row else None
+        return dict(zip(columns, row))
     except Exception as e:
         logger.error(f"Database error: {e}")
         return None
+    finally:
+        if 'conn' in locals():
+            conn.close()
 
 def db_fetch_all(query: str, params: tuple = ()):
     try:
@@ -105,12 +114,13 @@ def db_fetch_all(query: str, params: tuple = ()):
         cur.execute(query, params)
         rows = cur.fetchall()
         columns = [desc[0] for desc in cur.description]
-        cur.close()
-        conn.close()
         return [dict(zip(columns, row)) for row in rows]
     except Exception as e:
         logger.error(f"Database error: {e}")
         return []
+    finally:
+        if 'conn' in locals():
+            conn.close()
 
 def db_execute(query: str, params: tuple = ()):
     try:
@@ -118,12 +128,13 @@ def db_execute(query: str, params: tuple = ()):
         cur = conn.cursor()
         cur.execute(query, params)
         conn.commit()
-        cur.close()
-        conn.close()
         return True
     except Exception as e:
         logger.error(f"Database error: {e}")
         return False
+    finally:
+        if 'conn' in locals():
+            conn.close()
 
 def convert_to_json_safe(data):
     if isinstance(data, list):
@@ -173,7 +184,7 @@ def get_conversation_history(session_id: str, max_messages: int = 10) -> List[Me
         for msg in reversed(messages)
     ]
 
-# Customer prompt template
+# Customer prompt template (unchanged)
 customer_prompt = PromptTemplate(
     input_variables=["context", "query", "lang", "conversation_history"],
     template="""
@@ -250,7 +261,7 @@ customer_prompt = PromptTemplate(
 llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", api_key=GEMINI_API_KEY)
 customer_chain = customer_prompt | llm | StrOutputParser()
 
-# Customer state
+# Customer state and workflow (unchanged)
 class CustomerState(PydanticBaseModel):
     query: str
     user_id: Optional[str] = None
@@ -260,7 +271,6 @@ class CustomerState(PydanticBaseModel):
     response: Optional[str] = None
     context_data: Optional[Dict[str, Any]] = None
 
-# Customer workflow nodes
 def retrieve_context(state: CustomerState) -> CustomerState:
     mall_name = None
     if "nakheel mall" in state.query.lower():
@@ -358,7 +368,6 @@ def generate_response(state: CustomerState) -> CustomerState:
     state.response = response
     return state
 
-# Customer workflow
 customer_workflow = StateGraph(CustomerState)
 customer_workflow.add_node("retrieve", retrieve_context)
 customer_workflow.add_node("respond", generate_response)
@@ -367,8 +376,8 @@ customer_workflow.add_edge("retrieve", "respond")
 customer_workflow.add_edge("respond", END)
 customer_graph = customer_workflow.compile()
 
+# Tenant state
 class TenantState(BaseModel):
-    """State for tenant conversation flow"""
     query: str
     user_id: str
     language: str = "en"
@@ -376,30 +385,37 @@ class TenantState(BaseModel):
     conversation_history: List[Dict[str, str]] = []
     entity_type: Optional[str] = None  # e.g., offer, product
     action: Optional[str] = None      # e.g., create, update, delete, list
-    collected_data: Dict[str, Any] = {}  # Natural language details (e.g., description)
-    current_step: Optional[str] = None   # Tracks what we’re asking for (e.g., store, description)
+    collected_data: Dict[str, Any] = {}  # Natural language details
+    current_step: Optional[str] = None   # e.g., "description", "select_offer", "update_field"
     store_name: Optional[str] = None     # Store name, not ID
     response: Optional[str] = None
+    offer_list: Optional[List[Dict[str, Any]]] = None  # Cached list for numbered options
 
+# Updated intent prompt
 intent_prompt = PromptTemplate(
     input_variables=["query", "conversation_history"],
     template="""
-    You are CenomiAI's tenant assistant. Parse this query to understand what the tenant wants to do.
-    
+    You are CenomiAI's tenant assistant. Parse this query to determine the tenant's intent based on the current query and conversation history.
+
     Valid entities: store, offer, product
     Valid actions: create, update, delete, list
-    
+
     Query: "{query}"
-    
+
     Previous conversation:
     {conversation_history}
-    
+
+    Instructions:
+    - Use the conversation history to resolve vague terms like "it", "that", or "the offer".
+    - If the query mentions "update" or "change" and follows a prior offer creation or mention, assume it refers to modifying an existing offer.
+    - If the query is ambiguous but follows a completed action (e.g., offer creation), start fresh unless explicitly continuing.
+    - Extract any specific details (e.g., description, store name) into collected_data.
+
     Return a JSON object with:
     - entity_type: What they’re working with (store, offer, product)
     - action: What they want to do (create, update, delete, list)
-    - collected_data: Any details they’ve provided (e.g., "description": "20% off summer sale", "store": "Fashion Hub")
-    
-    Use context from the conversation history to resolve vague terms like "it" or "that." If a store, offer, or product is mentioned vaguely, infer it from the history.
+    - collected_data: Any details provided (e.g., "description": "20% off", "store": "Zara")
+
     Return only valid JSON in triple backticks.
     """
 )
@@ -412,22 +428,29 @@ def analyze_intent(state: TenantState) -> TenantState:
     end = intent_result.rfind("```")
     intent_data = json.loads(intent_result[start:end].strip())
     
+    logger.info(f"Intent parsed: {intent_data}")
+    
+    # Reset collected_data for a new operation unless continuing
+    if not state.current_step:
+        state.collected_data = {}
+    
     state.entity_type = intent_data.get("entity_type")
     state.action = intent_data.get("action")
     state.collected_data.update(intent_data.get("collected_data", {}))
     
-    # Infer store automatically
     user_stores = db_fetch_all("SELECT name_en FROM stores WHERE tenant_id = %s", (state.user_id,))
     if "store" in state.collected_data:
-        requested_store = state.collected_data["store"]
-        matching_store = next((s for s in user_stores if s["name_en"].lower() == requested_store.lower()), None)
-
+        requested_store = state.collected_data["store"].lower()
+        matching_store = next((s for s in user_stores if s["name_en"].lower() == requested_store), None)
         if matching_store:
             state.store_name = matching_store["name_en"]
         else:
-            state.response = f"I couldn’t find a store named '{requested_store}'. You can manage only your stores. Here are your stores: {', '.join([s['name_en'] for s in user_stores])}"
+            state.response = f"I couldn’t find '{requested_store}'. Your stores: {', '.join([s['name_en'] for s in user_stores])}"
+            state.current_step = "select_store"
+            return state
     elif len(user_stores) == 1:
         state.store_name = user_stores[0]["name_en"]
+        logger.info(f"Default store set to {state.store_name}")
     elif len(user_stores) > 1 and not state.store_name:
         state.current_step = "select_store"
     
@@ -436,53 +459,76 @@ def analyze_intent(state: TenantState) -> TenantState:
 def prompt_for_missing_info(state: TenantState) -> TenantState:
     user_stores = db_fetch_all("SELECT name_en FROM stores WHERE tenant_id = %s", (state.user_id,))
     
-    # Step 1: Handle store selection
     if state.current_step == "select_store" or (len(user_stores) > 1 and not state.store_name):
         if not user_stores:
-            state.response = "Looks like you don’t have any stores yet. Contact mall management to get started!"
+            state.response = "You don’t have any stores yet. Contact mall management to get started!"
             return state
-        store_list = "\n".join([f"- {store['name_en']}" for store in user_stores])
-        state.response = f"Hi! You’ve got a few stores. Which one should I use for this?\n{store_list}\nJust tell me the name!"
+        store_list = "\n".join([f"{i+1}) {s['name_en']}" for i, s in enumerate(user_stores)])
+        state.response = f"You’ve got multiple stores! Which one?\n{store_list}\nType the number!"
         state.current_step = "select_store"
         return state
     
-    # Step 2: Collect entity details
+    if not state.store_name and len(user_stores) == 1:
+        state.store_name = user_stores[0]["name_en"]
+        logger.info(f"Auto-set store_name to {state.store_name}")
+    
     if state.entity_type == "offer":
         if state.action == "create":
             if "description" not in state.collected_data:
-                state.response = "Awesome! What’s this offer about? (e.g., '20% off summer clothes')"
+                state.response = f"What’s the offer for {state.store_name}? (e.g., '20% off summer clothes')"
                 state.current_step = "description"
             elif "start_date" not in state.collected_data:
-                state.response = "When should this offer start? You can say 'today' or something like '2025-04-01'."
+                state.response = "When should it start? (e.g., 'today' or '2025-04-01')"
                 state.current_step = "start_date"
             elif "end_date" not in state.collected_data:
-                state.response = "And when should it end? (e.g., '2025-04-30')"
+                state.response = "When should it end? (e.g., '2025-04-30')"
                 state.current_step = "end_date"
             else:
                 execute_operation(state)
         elif state.action == "update":
             if "description" not in state.collected_data:
                 offers = db_fetch_all(
-                    "SELECT description_en FROM offers WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
+                    "SELECT description_en, start_date, end_date FROM offers WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
                     (state.store_name, state.user_id)
                 )
-                offer_list = "\n".join([f"- {o['description_en']}" for o in offers]) if offers else "None yet!"
-                state.response = f"Which offer do you want to change in {state.store_name}?\n{offer_list}\nTell me the one you mean!"
-                state.current_step = "description"
-            elif "new_description" not in state.collected_data:
-                state.response = f"Okay, updating '{state.collected_data['description']}'. What should the new offer say?"
+                if not offers:
+                    state.response = f"No offers found for {state.store_name}. Want to add one?"
+                    state.entity_type = None
+                    state.action = None
+                    return state
+                state.offer_list = offers
+                offer_list = "\n".join([f"{i+1}) {o['description_en']} (Valid: {o['start_date']} to {o['end_date']})" for i, o in enumerate(offers)])
+                state.response = f"Which offer to update in {state.store_name}?\n{offer_list}\nType the number!"
+                state.current_step = "select_offer"
+            elif "update_field" not in state.collected_data:
+                state.response = f"What do you want to change for '{state.collected_data['description']}'?\n1) Description\n2) Start Date\n3) End Date\nType the number!"
+                state.current_step = "update_field"
+            elif state.collected_data["update_field"] == "1" and "new_description" not in state.collected_data:
+                state.response = f"What’s the new description for '{state.collected_data['description']}'?"
                 state.current_step = "new_description"
+            elif state.collected_data["update_field"] == "2" and "new_start_date" not in state.collected_data:
+                state.response = f"What’s the new start date for '{state.collected_data['description']}'? (e.g., '2025-04-01')"
+                state.current_step = "new_start_date"
+            elif state.collected_data["update_field"] == "3" and "new_end_date" not in state.collected_data:
+                state.response = f"What’s the new end date for '{state.collected_data['description']}'? (e.g., '2025-04-30')"
+                state.current_step = "new_end_date"
             else:
                 execute_operation(state)
         elif state.action == "delete":
             if "description" not in state.collected_data:
                 offers = db_fetch_all(
-                    "SELECT description_en FROM offers WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
+                    "SELECT description_en, start_date, end_date FROM offers WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
                     (state.store_name, state.user_id)
                 )
-                offer_list = "\n".join([f"- {o['description_en']}" for o in offers]) if offers else "None yet!"
-                state.response = f"Which offer should I remove from {state.store_name}?\n{offer_list}\nJust say the one you want gone!"
-                state.current_step = "description"
+                if not offers:
+                    state.response = f"No offers found for {state.store_name}. Want to add one?"
+                    state.entity_type = None
+                    state.action = None
+                    return state
+                state.offer_list = offers
+                offer_list = "\n".join([f"{i+1}) {o['description_en']} (Valid: {o['start_date']} to {o['end_date']})" for i, o in enumerate(offers)])
+                state.response = f"Which offer to remove from {state.store_name}?\n{offer_list}\nType the number!"
+                state.current_step = "select_offer"
             else:
                 execute_operation(state)
         elif state.action == "list":
@@ -491,62 +537,10 @@ def prompt_for_missing_info(state: TenantState) -> TenantState:
                 (state.store_name, state.user_id)
             )
             if not offers:
-                state.response = f"You don’t have any offers in {state.store_name} yet. Want to add one?"
+                state.response = f"No offers in {state.store_name} yet. Want to add one?"
             else:
-                offer_list = "\n".join([f"- {o['description_en']} (Valid: {o['start_date']} to {o['end_date']})" for o in offers])
-                state.response = f"Here are your offers for {state.store_name}:\n{offer_list}"
-    
-    elif state.entity_type == "product":
-        if state.action == "create":
-            if "name" not in state.collected_data:
-                state.response = "Cool! What’s the product called? (e.g., 'Blue T-Shirt')"
-                state.current_step = "name"
-            elif "description" not in state.collected_data:
-                state.response = f"Nice! What’s '{state.collected_data['name']}' about? (e.g., 'Cotton, size M')"
-                state.current_step = "description"
-            elif "price" not in state.collected_data:
-                state.response = "How much does it cost? (e.g., '50')"
-                state.current_step = "price"
-            elif "currency" not in state.collected_data:
-                state.response = "What currency? (e.g., 'SAR' or 'USD')"
-                state.current_step = "currency"
-            else:
-                execute_operation(state)
-        elif state.action == "update":
-            if "name" not in state.collected_data:
-                products = db_fetch_all(
-                    "SELECT name_en FROM products WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
-                    (state.store_name, state.user_id)
-                )
-                product_list = "\n".join([f"- {p['name_en']}" for p in products]) if products else "None yet!"
-                state.response = f"Which product do you want to change in {state.store_name}?\n{product_list}\nTell me the name!"
-                state.current_step = "name"
-            elif "new_description" not in state.collected_data:
-                state.response = f"Okay, updating '{state.collected_data['name']}'. What should the new description be?"
-                state.current_step = "new_description"
-            else:
-                execute_operation(state)
-        elif state.action == "delete":
-            if "name" not in state.collected_data:
-                products = db_fetch_all(
-                    "SELECT name_en FROM products WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
-                    (state.store_name, state.user_id)
-                )
-                product_list = "\n".join([f"- {p['name_en']}" for p in products]) if products else "None yet!"
-                state.response = f"Which product should I remove from {state.store_name}?\n{product_list}\nJust say the name!"
-                state.current_step = "name"
-            else:
-                execute_operation(state)
-        elif state.action == "list":
-            products = db_fetch_all(
-                "SELECT name_en, description_en, price, currency FROM products WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
-                (state.store_name, state.user_id)
-            )
-            if not products:
-                state.response = f"You don’t have any products in {state.store_name} yet. Want to add one?"
-            else:
-                product_list = "\n".join([f"- {p['name_en']}: {p['description_en']} ({p['price']} {p['currency']})" for p in products])
-                state.response = f"Here are your products for {state.store_name}:\n{product_list}"
+                offer_list = "\n".join([f"{i+1}) {o['description_en']} (Valid: {o['start_date']} to {o['end_date']})" for i, o in enumerate(offers)])
+                state.response = f"Here are your offers for {state.store_name}:\n{offer_list}\nAnything else?"
     
     return state
 
@@ -556,17 +550,51 @@ def process_input(state: TenantState) -> TenantState:
     
     if state.current_step == "select_store":
         user_stores = db_fetch_all("SELECT name_en FROM stores WHERE tenant_id = %s", (state.user_id,))
-        store_name = state.query.strip().lower()
-        matching_store = next((s for s in user_stores if s["name_en"].lower() == store_name), None)
-        if matching_store:
-            state.store_name = matching_store["name_en"]
-            state.current_step = None
-        else:
-            store_list = "\n".join([f"- {s['name_en']}" for s in user_stores])
-            state.response = f"Hmm, I didn’t find that store. Pick one of yours:\n{store_list}"
+        try:
+            choice = int(state.query.strip()) - 1
+            if 0 <= choice < len(user_stores):
+                state.store_name = user_stores[choice]["name_en"]
+                state.current_step = None
+                logger.info(f"Store selected: {state.store_name}")
+            else:
+                store_list = "\n".join([f"{i+1}) {s['name_en']}" for i, s in enumerate(user_stores)])
+                state.response = f"Invalid option! Pick a number:\n{store_list}"
+                return state
+        except ValueError:
+            store_list = "\n".join([f"{i+1}) {s['name_en']}" for i, s in enumerate(user_stores)])
+            state.response = f"Please type a number! Here are your stores:\n{store_list}"
             return state
     
-    elif state.current_step in ["description", "new_description", "start_date", "end_date", "name", "price", "currency"]:
+    elif state.current_step == "select_offer":
+        try:
+            choice = int(state.query.strip()) - 1
+            if 0 <= choice < len(state.offer_list):
+                state.collected_data["description"] = state.offer_list[choice]["description_en"]
+                state.current_step = None
+                state.offer_list = None
+            else:
+                offer_list = "\n".join([f"{i+1}) {o['description_en']} (Valid: {o['start_date']} to {o['end_date']})" for i, o in enumerate(state.offer_list)])
+                state.response = f"Invalid option! Pick a number:\n{offer_list}"
+                return state
+        except ValueError:
+            offer_list = "\n".join([f"{i+1}) {o['description_en']} (Valid: {o['start_date']} to {o['end_date']})" for i, o in enumerate(state.offer_list)])
+            state.response = f"Please type a number! Options:\n{offer_list}"
+            return state
+    
+    elif state.current_step == "update_field":
+        try:
+            choice = int(state.query.strip())
+            if choice in [1, 2, 3]:
+                state.collected_data["update_field"] = str(choice)
+                state.current_step = None
+            else:
+                state.response = "Invalid option! Choose: 1) Description, 2) Start Date, 3) End Date"
+                return state
+        except ValueError:
+            state.response = "Please type a number! 1) Description, 2) Start Date, 3) End Date"
+            return state
+    
+    elif state.current_step in ["description", "new_description", "start_date", "end_date", "new_start_date", "new_end_date"]:
         state.collected_data[state.current_step] = state.query.strip()
         state.current_step = None
     
@@ -578,10 +606,11 @@ def execute_operation(state: TenantState) -> None:
         (state.store_name, state.user_id)
     )
     if not store:
-        state.response = f"I couldn’t find {state.store_name} in the list of stores you manage."
+        state.response = f"I couldn’t find {state.store_name} in your stores."
         return
     
     store_id = store["store_id"]
+    logger.info(f"Executing {state.action} on {state.entity_type} for store_id: {store_id}")
     
     if state.entity_type == "offer":
         if state.action == "create":
@@ -592,32 +621,56 @@ def execute_operation(state: TenantState) -> None:
                 "INSERT INTO offers (store_id, description_en, description_ar, start_date, end_date) VALUES (%s, %s, %s, %s, %s)",
                 (store_id, description, description, start_date, end_date)
             )
-            offer_id = db_fetch_one("SELECT currval(pg_get_serial_sequence('offers', 'offer_id')) AS id")["id"]
-            vector = embeddings.embed_query(description)
-            index.upsert(vectors=[{
-                "id": f"offer_{offer_id}_en",
-                "values": vector,
-                "metadata": {"type": "offer", "id": offer_id, "description_en": description, "lang": "en"}
-            }])
-            state.response = f"Done! Added '{description}' to {state.store_name} from {start_date} to {end_date}. Anything else you’d like to do? 😊"
+            offer = db_fetch_one("SELECT offer_id FROM offers WHERE store_id = %s AND description_en = %s", (store_id, description))
+            if offer:
+                offer_id = offer["offer_id"]
+                vector = embeddings.embed_query(description)
+                index.upsert(vectors=[{
+                    "id": f"offer_{offer_id}_en",
+                    "values": vector,
+                    "metadata": {"type": "offer", "id": offer_id, "description_en": description, "lang": "en"}
+                }])
+                state.response = f"Added '{description}' to {state.store_name} from {start_date} to {end_date}. Anything else? 😊"
+            else:
+                state.response = f"Failed to add '{description}'. Try again or contact support."
         elif state.action == "update":
             old_desc = state.collected_data["description"]
-            new_desc = state.collected_data["new_description"]
-            db_execute(
-                "UPDATE offers SET description_en = %s, description_ar = %s WHERE store_id = %s AND description_en = %s",
-                (new_desc, new_desc, store_id, old_desc)
-            )
-            offer_id = db_fetch_one(
+            update_field = state.collected_data["update_field"]
+            offer = db_fetch_one(
                 "SELECT offer_id FROM offers WHERE store_id = %s AND description_en = %s",
-                (store_id, new_desc)
-            )["offer_id"]
-            vector = embeddings.embed_query(new_desc)
-            index.upsert(vectors=[{
-                "id": f"offer_{offer_id}_en",
-                "values": vector,
-                "metadata": {"type": "offer", "id": offer_id, "description_en": new_desc, "lang": "en"}
-            }])
-            state.response = f"Updated! '{old_desc}' is now '{new_desc}' in {state.store_name}."
+                (store_id, old_desc)
+            )
+            if not offer:
+                state.response = f"Couldn’t find '{old_desc}' in {state.store_name}. Want to list offers?"
+                return
+            offer_id = offer["offer_id"]
+            if update_field == "1":  # Description
+                new_desc = state.collected_data["new_description"]
+                db_execute(
+                    "UPDATE offers SET description_en = %s, description_ar = %s WHERE offer_id = %s",
+                    (new_desc, new_desc, offer_id)
+                )
+                vector = embeddings.embed_query(new_desc)
+                index.upsert(vectors=[{
+                    "id": f"offer_{offer_id}_en",
+                    "values": vector,
+                    "metadata": {"type": "offer", "id": offer_id, "description_en": new_desc, "lang": "en"}
+                }])
+                state.response = f"Updated '{old_desc}' to '{new_desc}' in {state.store_name}. Anything else? 😊"
+            elif update_field == "2":  # Start Date
+                new_start_date = state.collected_data["new_start_date"]
+                db_execute(
+                    "UPDATE offers SET start_date = %s WHERE offer_id = %s",
+                    (new_start_date, offer_id)
+                )
+                state.response = f"Updated '{old_desc}' start date to {new_start_date} in {state.store_name}. Anything else? 😊"
+            elif update_field == "3":  # End Date
+                new_end_date = state.collected_data["new_end_date"]
+                db_execute(
+                    "UPDATE offers SET end_date = %s WHERE offer_id = %s",
+                    (new_end_date, offer_id)
+                )
+                state.response = f"Updated '{old_desc}' end date to {new_end_date} in {state.store_name}. Anything else? 😊"
         elif state.action == "delete":
             description = state.collected_data["description"]
             offer = db_fetch_one(
@@ -626,68 +679,18 @@ def execute_operation(state: TenantState) -> None:
             )
             if offer:
                 offer_id = offer["offer_id"]
-                db_execute("DELETE FROM offers WHERE store_id = %s AND description_en = %s", (store_id, description))
+                db_execute("DELETE FROM offers WHERE offer_id = %s", (offer_id,))
                 index.delete(ids=[f"offer_{offer_id}_en"])
-                state.response = f"Poof! '{description}' is gone from {state.store_name}."
+                state.response = f"Removed '{description}' from {state.store_name}. Anything else? 😊"
             else:
-                state.response = f"I couldn’t find '{description}' in {state.store_name}. Want to list your offers to check?"
-    
-    elif state.entity_type == "product":
-        if state.action == "create":
-            name = state.collected_data["name"]
-            description = state.collected_data["description"]
-            price = state.collected_data["price"]
-            currency = state.collected_data.get("currency", "SAR")
-            db_execute(
-                "INSERT INTO products (store_id, name_en, name_ar, description_en, description_ar, price, currency) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                (store_id, name, name, description, description, price, currency)
-            )
-            product_id = db_fetch_one("SELECT currval(pg_get_serial_sequence('products', 'product_id')) AS id")["id"]
-            vector = embeddings.embed_query(f"{name} {description}")
-            index.upsert(vectors=[{
-                "id": f"product_{product_id}_en",
-                "values": vector,
-                "metadata": {"type": "product", "id": product_id, "name_en": name, "description_en": description, "price": price, "currency": currency, "lang": "en"}
-            }])
-            state.response = f"Done! Added '{name}' ({description}) to {state.store_name} for {price} {currency}. Anything else? 😊"
-        elif state.action == "update":
-            name = state.collected_data["name"]
-            new_desc = state.collected_data["new_description"]
-            db_execute(
-                "UPDATE products SET description_en = %s, description_ar = %s WHERE store_id = %s AND name_en = %s",
-                (new_desc, new_desc, store_id, name)
-            )
-            product = db_fetch_one(
-                "SELECT product_id FROM products WHERE store_id = %s AND name_en = %s",
-                (store_id, name)
-            )
-            product_id = product["product_id"]
-            vector = embeddings.embed_query(f"{name} {new_desc}")
-            index.upsert(vectors=[{
-                "id": f"product_{product_id}_en",
-                "values": vector,
-                "metadata": {"type": "product", "id": product_id, "name_en": name, "description_en": new_desc, "lang": "en"}
-            }])
-            state.response = f"Updated! '{name}' now has description '{new_desc}' in {state.store_name}."
-        elif state.action == "delete":
-            name = state.collected_data["name"]
-            product = db_fetch_one(
-                "SELECT product_id FROM products WHERE store_id = %s AND name_en = %s",
-                (store_id, name)
-            )
-            if product:
-                product_id = product["product_id"]
-                db_execute("DELETE FROM products WHERE store_id = %s AND name_en = %s", (store_id, name))
-                index.delete(ids=[f"product_{product_id}_en"])
-                state.response = f"Poof! '{name}' is gone from {state.store_name}."
-            else:
-                state.response = f"I couldn’t find '{name}' in {state.store_name}. Want to list your products to check?"
+                state.response = f"Couldn’t find '{description}' in {state.store_name}. Want to list offers?"
     
     # Reset state
     state.entity_type = None
     state.action = None
     state.collected_data = {}
     state.current_step = None
+    state.offer_list = None
 
 tenant_prompt = PromptTemplate(
     input_variables=["message", "conversation_history", "entity_type", "action"],
@@ -727,7 +730,7 @@ def tenant_recognize_intent(state: TenantState) -> TenantState:
             "action": state.action or "unknown"
         })
     else:
-        state.response = "I’m not sure what you want to do. You can add, update, or remove offers or products—just let me know!"
+        state.response = "I’m not sure what you want to do. You can add, update, or remove offers—just let me know!"
     return state
 
 tenant_workflow = StateGraph(TenantState)
@@ -782,7 +785,7 @@ async def tenant_update(request: UpdateRequest):
 
     result = tenant_graph.invoke(state)
     
-    state_json = json.dumps(result)
+    state_json = json.dumps(result, cls=DateTimeEncoder)
     db_execute("UPDATE conversations SET current_state = %s WHERE session_id = %s", (state_json, session_id))
     
     add_message_to_conversation(session_id, "user", request.text)
