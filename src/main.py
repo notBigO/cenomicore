@@ -1,3 +1,4 @@
+from decimal import Decimal
 from fastapi import FastAPI, HTTPException
 from pinecone import Pinecone
 from sentence_transformers import SentenceTransformer
@@ -63,6 +64,8 @@ class DateTimeEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, datetime):
             return obj.isoformat()
+        elif isinstance(obj, Decimal):
+            return float(obj)
         return super().default(obj)
 
 class Message(BaseModel):
@@ -376,7 +379,7 @@ customer_workflow.add_edge("retrieve", "respond")
 customer_workflow.add_edge("respond", END)
 customer_graph = customer_workflow.compile()
 
-# Tenant state
+# Tenant state (unchanged)
 class TenantState(BaseModel):
     query: str
     user_id: str
@@ -391,7 +394,7 @@ class TenantState(BaseModel):
     response: Optional[str] = None
     offer_list: Optional[List[Dict[str, Any]]] = None  # Cached list for numbered options
 
-# Updated intent prompt
+# Updated intent prompt to include products
 intent_prompt = PromptTemplate(
     input_variables=["query", "conversation_history"],
     template="""
@@ -406,15 +409,15 @@ intent_prompt = PromptTemplate(
     {conversation_history}
 
     Instructions:
-    - Use the conversation history to resolve vague terms like "it", "that", or "the offer".
-    - If the query mentions "update" or "change" and follows a prior offer creation or mention, assume it refers to modifying an existing offer.
-    - If the query is ambiguous but follows a completed action (e.g., offer creation), start fresh unless explicitly continuing.
-    - Extract any specific details (e.g., description, store name) into collected_data.
+    - Use the conversation history to resolve vague terms like "it", "that", or "the product/offer".
+    - If the query mentions "update" or "change" and follows a prior product/offer creation or mention, assume it refers to modifying an existing entity.
+    - If the query is ambiguous but follows a completed action (e.g., product creation), start fresh unless explicitly continuing.
+    - Extract any specific details (e.g., name, description, store name) into collected_data.
 
     Return a JSON object with:
     - entity_type: What they’re working with (store, offer, product)
     - action: What they want to do (create, update, delete, list)
-    - collected_data: Any details provided (e.g., "description": "20% off", "store": "Zara")
+    - collected_data: Any details provided (e.g., "name": "Blue Shirt", "description": "20% off", "store": "Zara")
 
     Return only valid JSON in triple backticks.
     """
@@ -542,6 +545,82 @@ def prompt_for_missing_info(state: TenantState) -> TenantState:
                 offer_list = "\n".join([f"{i+1}) {o['description_en']} (Valid: {o['start_date']} to {o['end_date']})" for i, o in enumerate(offers)])
                 state.response = f"Here are your offers for {state.store_name}:\n{offer_list}\nAnything else?"
     
+    elif state.entity_type == "product":
+        if state.action == "create":
+            if "name" not in state.collected_data:
+                state.response = f"What’s the product name for {state.store_name}? (e.g., 'Blue Shirt')"
+                state.current_step = "name"
+            elif "description" not in state.collected_data:
+                state.response = f"What’s the description for '{state.collected_data['name']}'? (e.g., 'Cotton, size M')"
+                state.current_step = "description"
+            elif "price" not in state.collected_data:
+                state.response = f"How much does '{state.collected_data['name']}' cost? (e.g., '50')"
+                state.current_step = "price"
+            elif "currency" not in state.collected_data:
+                state.response = f"What’s the currency for '{state.collected_data['name']}'? (e.g., 'SAR')"
+                state.current_step = "currency"
+            else:
+                execute_operation(state)
+        elif state.action == "update":
+            if "name" not in state.collected_data:
+                products = db_fetch_all(
+                    "SELECT name_en, description_en, price, currency FROM products WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
+                    (state.store_name, state.user_id)
+                )
+                if not products:
+                    state.response = f"No products found for {state.store_name}. Want to add one?"
+                    state.entity_type = None
+                    state.action = None
+                    return state
+                state.offer_list = products  # Reusing offer_list for simplicity
+                product_list = "\n".join([f"{i+1}) {p['name_en']} - {p['description_en']} ({p['price']} {p['currency']})" for i, p in enumerate(products)])
+                state.response = f"Which product to update in {state.store_name}?\n{product_list}\nType the number!"
+                state.current_step = "select_product"
+            elif "update_field" not in state.collected_data:
+                state.response = f"What do you want to change for '{state.collected_data['name']}'?\n1) Name\n2) Description\n3) Price\n4) Currency\nType the number!"
+                state.current_step = "update_field"
+            elif state.collected_data["update_field"] == "1" and "new_name" not in state.collected_data:
+                state.response = f"What’s the new name for '{state.collected_data['name']}'?"
+                state.current_step = "new_name"
+            elif state.collected_data["update_field"] == "2" and "new_description" not in state.collected_data:
+                state.response = f"What’s the new description for '{state.collected_data['name']}'?"
+                state.current_step = "new_description"
+            elif state.collected_data["update_field"] == "3" and "new_price" not in state.collected_data:
+                state.response = f"What’s the new price for '{state.collected_data['name']}'? (e.g., '60')"
+                state.current_step = "new_price"
+            elif state.collected_data["update_field"] == "4" and "new_currency" not in state.collected_data:
+                state.response = f"What’s the new currency for '{state.collected_data['name']}'? (e.g., 'USD')"
+                state.current_step = "new_currency"
+            else:
+                execute_operation(state)
+        elif state.action == "delete":
+            if "name" not in state.collected_data:
+                products = db_fetch_all(
+                    "SELECT name_en, description_en, price, currency FROM products WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
+                    (state.store_name, state.user_id)
+                )
+                if not products:
+                    state.response = f"No products found for {state.store_name}. Want to add one?"
+                    state.entity_type = None
+                    state.action = None
+                    return state
+                state.offer_list = products
+                product_list = "\n".join([f"{i+1}) {p['name_en']} - {p['description_en']} ({p['price']} {p['currency']})" for i, p in enumerate(products)])
+                state.response = f"Which product to remove from {state.store_name}?\n{product_list}\nType the number!"
+                state.current_step = "select_product"
+            else:
+                execute_operation(state)
+        elif state.action == "list":
+            products = db_fetch_all(
+                "SELECT name_en, description_en, price, currency FROM products WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
+                (state.store_name, state.user_id)
+            )
+            if not products:
+                state.response = f"No products in {state.store_name} yet. Want to add one?"
+            else:
+                product_list = "\n".join([f"{i+1}) {p['name_en']} - {p['description_en']} ({p['price']} {p['currency']})" for i, p in enumerate(products)])
+                state.response = f"Here are your products for {state.store_name}:\n{product_list}\nAnything else?"
+    
     return state
 
 def process_input(state: TenantState) -> TenantState:
@@ -581,20 +660,46 @@ def process_input(state: TenantState) -> TenantState:
             state.response = f"Please type a number! Options:\n{offer_list}"
             return state
     
+    elif state.current_step == "select_product":
+        try:
+            choice = int(state.query.strip()) - 1
+            if 0 <= choice < len(state.offer_list):
+                state.collected_data["name"] = state.offer_list[choice]["name_en"]
+                state.current_step = None
+                state.offer_list = None
+            else:
+                product_list = "\n".join([f"{i+1}) {p['name_en']} - {p['description_en']} ({p['price']} {p['currency']})" for i, p in enumerate(state.offer_list)])
+                state.response = f"Invalid option! Pick a number:\n{product_list}"
+                return state
+        except ValueError:
+            product_list = "\n".join([f"{i+1}) {p['name_en']} - {p['description_en']} ({p['price']} {p['currency']})" for i, p in enumerate(state.offer_list)])
+            state.response = f"Please type a number! Options:\n{product_list}"
+            return state
+    
     elif state.current_step == "update_field":
         try:
             choice = int(state.query.strip())
-            if choice in [1, 2, 3]:
+            if state.entity_type == "offer" and choice in [1, 2, 3]:
+                state.collected_data["update_field"] = str(choice)
+                state.current_step = None
+            elif state.entity_type == "product" and choice in [1, 2, 3, 4]:
                 state.collected_data["update_field"] = str(choice)
                 state.current_step = None
             else:
-                state.response = "Invalid option! Choose: 1) Description, 2) Start Date, 3) End Date"
+                if state.entity_type == "offer":
+                    state.response = "Invalid option! Choose: 1) Description, 2) Start Date, 3) End Date"
+                else:  # product
+                    state.response = "Invalid option! Choose: 1) Name, 2) Description, 3) Price, 4) Currency"
                 return state
         except ValueError:
-            state.response = "Please type a number! 1) Description, 2) Start Date, 3) End Date"
+            if state.entity_type == "offer":
+                state.response = "Please type a number! 1) Description, 2) Start Date, 3) End Date"
+            else:  # product
+                state.response = "Please type a number! 1) Name, 2) Description, 3) Price, 4) Currency"
             return state
     
-    elif state.current_step in ["description", "new_description", "start_date", "end_date", "new_start_date", "new_end_date"]:
+    elif state.current_step in ["description", "new_description", "start_date", "end_date", "new_start_date", "new_end_date", 
+                                "name", "new_name", "price", "new_price", "currency", "new_currency"]:
         state.collected_data[state.current_step] = state.query.strip()
         state.current_step = None
     
@@ -685,6 +790,93 @@ def execute_operation(state: TenantState) -> None:
             else:
                 state.response = f"Couldn’t find '{description}' in {state.store_name}. Want to list offers?"
     
+    elif state.entity_type == "product":
+        if state.action == "create":
+            name = state.collected_data["name"]
+            description = state.collected_data.get("description")  # Optional, can be NULL
+            price = float(state.collected_data["price"])  # Convert to float for numeric type
+            currency = state.collected_data["currency"]
+            db_execute(
+                "INSERT INTO products (store_id, name_en, name_ar, description_en, description_ar, price, currency) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (store_id, name, name, description, description, price, currency)
+            )
+            product = db_fetch_one("SELECT product_id FROM products WHERE store_id = %s AND name_en = %s", (store_id, name))
+            if product:
+                product_id = product["product_id"]
+                vector = embeddings.embed_query(f"{name} {description or ''}")
+                index.upsert(vectors=[{
+                    "id": f"product_{product_id}_en",
+                    "values": vector,
+                    "metadata": {"type": "product", "id": product_id, "name_en": name, "description_en": description or "", "price": price, "currency": currency, "lang": "en"}
+                }])
+                state.response = f"Added '{name}' ({description or 'No description'}) to {state.store_name} for {price} {currency}. Anything else? 😊"
+            else:
+                state.response = f"Failed to add '{name}'. Try again or contact support."
+        elif state.action == "update":
+            old_name = state.collected_data["name"]
+            update_field = state.collected_data["update_field"]
+            product = db_fetch_one(
+                "SELECT product_id FROM products WHERE store_id = %s AND name_en = %s",
+                (store_id, old_name)
+            )
+            if not product:
+                state.response = f"Couldn’t find '{old_name}' in {state.store_name}. Want to list products?"
+                return
+            product_id = product["product_id"]
+            if update_field == "1":  # Name
+                new_name = state.collected_data["new_name"]
+                db_execute(
+                    "UPDATE products SET name_en = %s, name_ar = %s WHERE product_id = %s",
+                    (new_name, new_name, product_id)
+                )
+                vector = embeddings.embed_query(f"{new_name} {state.collected_data.get('description', '')}")
+                index.upsert(vectors=[{
+                    "id": f"product_{product_id}_en",
+                    "values": vector,
+                    "metadata": {"type": "product", "id": product_id, "name_en": new_name, "description_en": state.collected_data.get("description", ""), "price": float(state.collected_data.get("price", 0)), "currency": state.collected_data.get("currency", ""), "lang": "en"}
+                }])
+                state.response = f"Updated '{old_name}' to '{new_name}' in {state.store_name}. Anything else? 😊"
+            elif update_field == "2":  # Description
+                new_desc = state.collected_data["new_description"]
+                db_execute(
+                    "UPDATE products SET description_en = %s, description_ar = %s WHERE product_id = %s",
+                    (new_desc, new_desc, product_id)
+                )
+                vector = embeddings.embed_query(f"{old_name} {new_desc}")
+                index.upsert(vectors=[{
+                    "id": f"product_{product_id}_en",
+                    "values": vector,
+                    "metadata": {"type": "product", "id": product_id, "name_en": old_name, "description_en": new_desc, "price": float(state.collected_data.get("price", 0)), "currency": state.collected_data.get("currency", ""), "lang": "en"}
+                }])
+                state.response = f"Updated '{old_name}' description to '{new_desc}' in {state.store_name}. Anything else? 😊"
+            elif update_field == "3":  # Price
+                new_price = float(state.collected_data["new_price"])
+                db_execute(
+                    "UPDATE products SET price = %s WHERE product_id = %s",
+                    (new_price, product_id)
+                )
+                state.response = f"Updated '{old_name}' price to {new_price} in {state.store_name}. Anything else? 😊"
+            elif update_field == "4":  # Currency
+                new_currency = state.collected_data["new_currency"]
+                db_execute(
+                    "UPDATE products SET currency = %s WHERE product_id = %s",
+                    (new_currency, product_id)
+                )
+                state.response = f"Updated '{old_name}' currency to {new_currency} in {state.store_name}. Anything else? 😊"
+        elif state.action == "delete":
+            name = state.collected_data["name"]
+            product = db_fetch_one(
+                "SELECT product_id FROM products WHERE store_id = %s AND name_en = %s",
+                (store_id, name)
+            )
+            if product:
+                product_id = product["product_id"]
+                db_execute("DELETE FROM products WHERE product_id = %s", (product_id,))
+                index.delete(ids=[f"product_{product_id}_en"])
+                state.response = f"Removed '{name}' from {state.store_name}. Anything else? 😊"
+            else:
+                state.response = f"Couldn’t find '{name}' in {state.store_name}. Want to list products?"
+    
     # Reset state
     state.entity_type = None
     state.action = None
@@ -730,7 +922,7 @@ def tenant_recognize_intent(state: TenantState) -> TenantState:
             "action": state.action or "unknown"
         })
     else:
-        state.response = "I’m not sure what you want to do. You can add, update, or remove offers—just let me know!"
+        state.response = "I’m not sure what you want to do. You can add, update, or remove offers or products—just let me know!"
     return state
 
 tenant_workflow = StateGraph(TenantState)
