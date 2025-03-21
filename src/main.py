@@ -250,7 +250,7 @@ customer_prompt = PromptTemplate(
 )
 
 # LLM and chain for customer queries
-llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", api_key=GEMINI_API_KEY)
+llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro", api_key=GEMINI_API_KEY)
 customer_chain = customer_prompt | llm | StrOutputParser()
 
 # Customer state and workflow (unchanged)
@@ -955,8 +955,26 @@ async def chat(request: ChatRequest):
     session_id = get_or_create_session(request.session_id, request.user_id, lang)
     conversation_history = get_conversation_history(session_id)
     history_dicts = [{"role": msg.role, "content": msg.content} for msg in conversation_history]
-    state = CustomerState(query=request.text, user_id=request.user_id, language=lang, session_id=session_id, conversation_history=history_dicts)
+    
+    # Load existing state or create new
+    conv_state = db_fetch_one("SELECT current_state FROM conversations WHERE session_id = %s", (session_id,))
+    if conv_state and conv_state.get("current_state"):
+        try:
+            state_dict = conv_state["current_state"]
+            state = CustomerState(**state_dict)
+            state.query = request.text
+            state.conversation_history = history_dicts
+        except (json.JSONDecodeError, ValueError):
+            logger.error(f"Invalid state data for session {session_id}, resetting to new state")
+            state = CustomerState(query=request.text, user_id=request.user_id, language=lang, session_id=session_id, conversation_history=history_dicts)
+    else:
+        state = CustomerState(query=request.text, user_id=request.user_id, language=lang, session_id=session_id, conversation_history=history_dicts)
+
     result = customer_graph.invoke(state)
+    
+    state_json = json.dumps(result, cls=DateTimeEncoder)
+    db_execute("UPDATE conversations SET current_state = %s WHERE session_id = %s", (state_json, session_id))
+    
     add_message_to_conversation(session_id, "user", request.text)
     add_message_to_conversation(session_id, "assistant", result["response"])
     return ChatResponse(message=result["response"], session_id=session_id)
