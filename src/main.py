@@ -194,63 +194,63 @@ customer_prompt = PromptTemplate(
     template="""
     You are CenomiAI, a friendly and highly knowledgeable mall assistant designed to enhance the shopping experience. Respond in {lang} with a warm, conversational tone, using emojis 😊 to keep it engaging. Your sole purpose is to assist with mall-related inquiries—stores, products, dining, services, amenities, events, offers, navigation, and more—while staying strictly within the mall context. Use the query, context, and conversation history to provide accurate, detailed, and tailored responses. If unsure or lacking info, ask clarifying questions or suggest helpful next steps while maintaining a supportive vibe.
 
-    ### Response Guidelines:
-    - **Store Queries**: 
+    Response Guidelines:
+    - Store Queries: 
       - Share specifics: store name, exact location (floor, nearby landmarks), hours, and offerings (e.g., products, brands, in-store cafes).
       - For category queries (e.g., "clothing stores"), list relevant options with locations and tailor to preferences (e.g., budget, style).
 
-    - **Product Queries**: 
+    - Product Queries: 
       - Address availability, brands, or types (e.g., "Does Zara have dresses?") with store suggestions and details if known.
       - If vague (e.g., "I need a gift"), ask about recipient or budget, then recommend stores or items.
 
-    - **Dining**: 
+    - Dining: 
       - Suggest options by cuisine, vibe (e.g., quick bites, date-night spots), or dietary needs (e.g., vegan, kid-friendly), including locations and highlights.
 
-    - **Services & Amenities**: 
+    - Services & Amenities: 
       - Provide directions to restrooms, ATMs, parking, play areas, etc., with practical details (e.g., "wheelchairs at info desk, Level 1").
       - Explain policies (e.g., Wi-Fi access, pet rules) or accessibility features.
 
-    - **Offers & Events**: 
+    - Offers & Events: 
       - Detail current promotions (e.g., discounts, BOGO) or events (e.g., date, time, location), even suggesting upcoming ones if relevant.
       - For vague queries (e.g., "What’s happening?"), highlight popular options or ask for preferences.
 
-    - **Navigation**: 
+    - Navigation: 
       - Offer clear, concise directions (e.g., "Food court’s on Level 2, left of the escalators") based on assumed or stated location.
       - Handle vague requests (e.g., "I’m lost") by asking for nearby landmarks or suggesting the info desk.
 
-    - **Vague or Emotional Queries**: 
+    - Vague or Emotional Queries: 
       - Interpret intent creatively: "I’m bored" → entertainment options; "I’m on a date" → romantic dining or activities; "I’m with kids" → family-friendly spots.
       - Ask follow-ups if needed (e.g., "What do you feel like doing? Shopping, eating, or fun?").
 
-    - **Personalization**: 
+    - Personalization: 
       - Use `user_id` for loyalty details (points, perks) if provided, otherwise explain generic program benefits.
       - Tailor suggestions to context (e.g., time-sensitive events, group dynamics).
 
-    - **Limitations**: 
+    - Limitations: 
       - If context lacks details, say: "I’m digging for that info 😅! Can you tell me more (e.g., which store or area) to help me out?"
       - Politely deflect non-mall topics: "I’m all about the mall—ask me anything from stores to events!"
 
-    ### Instructions:
-    - **Context**: Leverage provided data (e.g., store locations, event times) for precision. If empty, rely on general mall knowledge or seek clarification.
-    - **History**: Reference past exchanges for continuity (e.g., "You asked about shoes earlier—want directions to Foot Locker?").
-    - **Tone**: Be concise yet rich in detail, avoiding jargon. Sound like a friend who knows the mall inside out.
-    - **Read-Only**: Don’t offer to change data—just inform and assist based on what’s available.
-    - **Out-of-Scope**: For non-mall queries, gently redirect: "I’m your mall expert—got any questions about here?"
-    - **Continuity**: If the user is following up on a previous question with pronouns like "it", "they", "that store", etc., use conversation history to understand what they're referring to.
+    Instructions:
+    - Context: Leverage provided data (e.g., store locations, event times) for precision. If empty, rely on general mall knowledge or seek clarification.
+    - History: Reference past exchanges for continuity (e.g., "You asked about shoes earlier—want directions to Foot Locker?").
+    - Tone: Be concise yet rich in detail, avoiding jargon. Sound like a friend who knows the mall inside out.
+    - Read-Only: Don’t offer to change data—just inform and assist based on what’s available.
+    - Out-of-Scope: For non-mall queries, gently redirect: "I’m your mall expert—got any questions about here?"
+    - Continuity: If the user is following up on a previous question with pronouns like "it", "they", "that store", etc., use conversation history to understand what they're referring to.
 
-    ### Current Query:
+    Current Query:
     "{query}"
 
-    ### Context:
+    Context:
     {context}
     
-    ### Conversation History:
+    Conversation History:
     {conversation_history}
     """
 )
 
 # LLM and chain for customer queries
-llm = ChatGoogleGenerativeAI(model="gemini-1.5-pro", api_key=GEMINI_API_KEY)
+llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", api_key=GEMINI_API_KEY)
 customer_chain = customer_prompt | llm | StrOutputParser()
 
 # Customer state and workflow (unchanged)
@@ -294,47 +294,89 @@ def retrieve_context(state: CustomerState) -> CustomerState:
     docs = results["matches"] if "matches" in results else []
     
     context = {
-        "stores": [], "offers": [], "events": [], "services": [], "amenities": [],
-        "products": [], "loyalty_programs": [], "customer_loyalty": []
+        "stores": [],
+        "offers": [],
+        "events": [],
+        "services": [],
+        "amenities": [],
+        "products": [],
+        "loyalty_programs": [],
+        "customer_loyalty": []
     }
+    store_ids = set()
+    
     for doc in docs:
         metadata = doc["metadata"]
         doc_type = metadata.get("type")
         if doc_type == "store":
-            context["stores"].append({
+            store = {
                 "name": metadata.get("name_en"),
                 "location": metadata.get("location_en"),
                 "category": metadata.get("category_en")
-            })
+            }
+            context["stores"].append(store)
         elif doc_type == "offer":
-            context["offers"].append({
+            offer = {
                 "description": metadata.get("description_en"),
-                "id": metadata.get("id")
-            })
+                "id": metadata.get("id"),
+                "store_id": metadata.get("store_id"),
+                "store_name": metadata.get("store_name"),
+                "location_en": metadata.get("location_en")
+            }
+            context["offers"].append(offer)
+            if metadata.get("store_id"):
+                store_ids.add(metadata["store_id"])
         elif doc_type == "event":
-            context["events"].append({
+            event = {
                 "name": metadata.get("name_en"),
                 "date": metadata.get("start_time"),
                 "location": metadata.get("location_en")
-            })
+            }
+            context["events"].append(event)
         elif doc_type == "service":
-            context["services"].append({
+            service = {
                 "name": metadata.get("name_en"),
                 "description": metadata.get("description_en")
-            })
+            }
+            context["services"].append(service)
         elif doc_type == "amenity":
-            context["amenities"].append({
+            amenity = {
                 "name": metadata.get("name_en"),
                 "location": metadata.get("location_en")
-            })
+            }
+            context["amenities"].append(amenity)
         elif doc_type == "product":
-            context["products"].append({
+            product = {
                 "name": metadata.get("name_en"),
                 "description": metadata.get("description_en"),
                 "price": metadata.get("price"),
-                "currency": metadata.get("currency")
-            })
+                "currency": metadata.get("currency"),
+                "store_id": metadata.get("store_id"),
+                "store_name": metadata.get("store_name"),
+                "location_en": metadata.get("location_en")
+            }
+            context["products"].append(product)
+            if metadata.get("store_id"):
+                store_ids.add(metadata["store_id"])
     
+    # Fetch store details for products/offers missing them (e.g., older data)
+    if store_ids:
+        stores = db_fetch_all(
+            "SELECT store_id, name_en, location_en, category_en FROM stores WHERE store_id IN %s",
+            (tuple(store_ids),)
+        )
+        store_map = {s["store_id"]: s for s in stores}
+        for product in context["products"]:
+            if not product.get("store_name") and product.get("store_id") in store_map:
+                store = store_map[product["store_id"]]
+                product["store_name"] = store["name_en"]
+                product["location_en"] = store["location_en"]
+        for offer in context["offers"]:
+            if not offer.get("store_name") and offer.get("store_id") in store_map:
+                store = store_map[offer["store_id"]]
+                offer["store_name"] = store["name_en"]
+                offer["location_en"] = store["location_en"]
+
     if state.user_id and state.user_id.startswith("c_"):
         customer_id = state.user_id[2:]  # Strip 'c_' prefix
         customer = db_fetch_one("SELECT customer_id FROM customers WHERE customer_id = %s", (customer_id,))
@@ -346,7 +388,7 @@ def retrieve_context(state: CustomerState) -> CustomerState:
                 "WHERE cl.customer_id = %s",
                 (customer_id,)
             )
-            context["customer_loyalty"] = loyalty or {} # type: ignore
+            context["customer_loyalty"] = loyalty or {}
     
     state.context_data = context
     state.response = json.dumps(convert_to_json_safe(context))
@@ -712,7 +754,7 @@ def process_input(state: TenantState) -> TenantState:
 def execute_operation(state: TenantState) -> None:
     tenant_id = state.user_id[2:] if state.user_id.startswith("t_") else state.user_id
     store = db_fetch_one(
-        "SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s",
+        "SELECT store_id, name_en, location_en FROM stores WHERE name_en = %s AND tenant_id = %s",
         (state.store_name, tenant_id)
     )
     if not store:
@@ -720,6 +762,8 @@ def execute_operation(state: TenantState) -> None:
         return
     
     store_id = store["store_id"]
+    store_name = store["name_en"]
+    location_en = store["location_en"]
     logger.info(f"Executing {state.action} on {state.entity_type} for store_id: {store_id}")
     
     if state.entity_type == "offer":
@@ -738,7 +782,15 @@ def execute_operation(state: TenantState) -> None:
                 index.upsert(vectors=[{
                     "id": f"offer_{offer_id}_en",
                     "values": vector,
-                    "metadata": {"type": "offer", "id": offer_id, "description_en": description, "lang": "en"}
+                    "metadata": {
+                        "type": "offer",
+                        "id": offer_id,
+                        "description_en": description,
+                        "store_id": store_id,
+                        "store_name": store_name,
+                        "location_en": location_en,
+                        "lang": "en"
+                    }
                 }])
                 state.response = f"Added '{description}' to {state.store_name} from {start_date} to {end_date}. Anything else? 😊"
             else:
@@ -764,7 +816,15 @@ def execute_operation(state: TenantState) -> None:
                 index.upsert(vectors=[{
                     "id": f"offer_{offer_id}_en",
                     "values": vector,
-                    "metadata": {"type": "offer", "id": offer_id, "description_en": new_desc, "lang": "en"}
+                    "metadata": {
+                        "type": "offer",
+                        "id": offer_id,
+                        "description_en": new_desc,
+                        "store_id": store_id,
+                        "store_name": store_name,
+                        "location_en": location_en,
+                        "lang": "en"
+                    }
                 }])
                 state.response = f"Updated '{old_desc}' to '{new_desc}' in {state.store_name}. Anything else? 😊"
             elif update_field == "2":
@@ -812,7 +872,18 @@ def execute_operation(state: TenantState) -> None:
                 index.upsert(vectors=[{
                     "id": f"product_{product_id}_en",
                     "values": vector,
-                    "metadata": {"type": "product", "id": product_id, "name_en": name, "description_en": description or "", "price": price, "currency": currency, "lang": "en"}
+                    "metadata": {
+                        "type": "product",
+                        "id": product_id,
+                        "name_en": name,
+                        "description_en": description or "",
+                        "price": price,
+                        "currency": currency,
+                        "store_id": store_id,
+                        "store_name": store_name,
+                        "location_en": location_en,
+                        "lang": "en"
+                    }
                 }])
                 state.response = f"Added '{name}' ({description or 'No description'}) to {state.store_name} for {price} {currency}. Anything else? 😊"
             else:
@@ -838,7 +909,18 @@ def execute_operation(state: TenantState) -> None:
                 index.upsert(vectors=[{
                     "id": f"product_{product_id}_en",
                     "values": vector,
-                    "metadata": {"type": "product", "id": product_id, "name_en": new_name, "description_en": state.collected_data.get("description", ""), "price": float(state.collected_data.get("price", 0)), "currency": state.collected_data.get("currency", ""), "lang": "en"}
+                    "metadata": {
+                        "type": "product",
+                        "id": product_id,
+                        "name_en": new_name,
+                        "description_en": state.collected_data.get("description", ""),
+                        "price": float(state.collected_data.get("price", 0)),
+                        "currency": state.collected_data.get("currency", ""),
+                        "store_id": store_id,
+                        "store_name": store_name,
+                        "location_en": location_en,
+                        "lang": "en"
+                    }
                 }])
                 state.response = f"Updated '{old_name}' to '{new_name}' in {state.store_name}. Anything else? 😊"
             elif update_field == "2":
@@ -851,7 +933,18 @@ def execute_operation(state: TenantState) -> None:
                 index.upsert(vectors=[{
                     "id": f"product_{product_id}_en",
                     "values": vector,
-                    "metadata": {"type": "product", "id": product_id, "name_en": old_name, "description_en": new_desc, "price": float(state.collected_data.get("price", 0)), "currency": state.collected_data.get("currency", ""), "lang": "en"}
+                    "metadata": {
+                        "type": "product",
+                        "id": product_id,
+                        "name_en": old_name,
+                        "description_en": new_desc,
+                        "price": float(state.collected_data.get("price", 0)),
+                        "currency": state.collected_data.get("currency", ""),
+                        "store_id": store_id,
+                        "store_name": store_name,
+                        "location_en": location_en,
+                        "lang": "en"
+                    }
                 }])
                 state.response = f"Updated '{old_name}' description to '{new_desc}' in {state.store_name}. Anything else? 😊"
             elif update_field == "3":
@@ -860,6 +953,23 @@ def execute_operation(state: TenantState) -> None:
                     "UPDATE products SET price = %s WHERE product_id = %s",
                     (new_price, product_id)
                 )
+                vector = embeddings.embed_query(f"{old_name} {state.collected_data.get('description', '')}")
+                index.upsert(vectors=[{
+                    "id": f"product_{product_id}_en",
+                    "values": vector,
+                    "metadata": {
+                        "type": "product",
+                        "id": product_id,
+                        "name_en": old_name,
+                        "description_en": state.collected_data.get("description", ""),
+                        "price": new_price,
+                        "currency": state.collected_data.get("currency", ""),
+                        "store_id": store_id,
+                        "store_name": store_name,
+                        "location_en": location_en,
+                        "lang": "en"
+                    }
+                }])
                 state.response = f"Updated '{old_name}' price to {new_price} in {state.store_name}. Anything else? 😊"
             elif update_field == "4":
                 new_currency = state.collected_data["new_currency"]
@@ -867,6 +977,23 @@ def execute_operation(state: TenantState) -> None:
                     "UPDATE products SET currency = %s WHERE product_id = %s",
                     (new_currency, product_id)
                 )
+                vector = embeddings.embed_query(f"{old_name} {state.collected_data.get('description', '')}")
+                index.upsert(vectors=[{
+                    "id": f"product_{product_id}_en",
+                    "values": vector,
+                    "metadata": {
+                        "type": "product",
+                        "id": product_id,
+                        "name_en": old_name,
+                        "description_en": state.collected_data.get("description", ""),
+                        "price": float(state.collected_data.get("price", 0)),
+                        "currency": new_currency,
+                        "store_id": store_id,
+                        "store_name": store_name,
+                        "location_en": location_en,
+                        "lang": "en"
+                    }
+                }])
                 state.response = f"Updated '{old_name}' currency to {new_currency} in {state.store_name}. Anything else? 😊"
         elif state.action == "delete":
             name = state.collected_data["name"]
