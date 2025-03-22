@@ -9,7 +9,7 @@ import json
 import os
 from pinecone import Pinecone
 from langchain_huggingface import HuggingFaceEmbeddings
-from utils import db_fetch_one, db_fetch_all, db_execute, convert_to_json_safe, logger
+from utils import db_fetch_one, db_fetch_all, db_execute, convert_to_json_safe, REDIS_CLIENT, logger, get_conversation_history
 
 # Pinecone setup
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
@@ -409,6 +409,7 @@ def execute_operation(state: TenantState) -> None:
                         "lang": "en"
                     }
                 }])
+                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
                 state.response = f"Added '{description}' to {state.store_name} from {start_date} to {end_date}. Anything else? 😊"
             else:
                 state.response = f"Failed to add '{description}'. Try again or contact support."
@@ -443,6 +444,7 @@ def execute_operation(state: TenantState) -> None:
                         "lang": "en"
                     }
                 }])
+                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
                 state.response = f"Updated '{old_desc}' to '{new_desc}' in {state.store_name}. Anything else? 😊"
             elif update_field == "2":
                 new_start_date = state.collected_data["new_start_date"]
@@ -450,6 +452,7 @@ def execute_operation(state: TenantState) -> None:
                     "UPDATE offers SET start_date = %s WHERE offer_id = %s",
                     (new_start_date, offer_id)
                 )
+                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
                 state.response = f"Updated '{old_desc}' start date to {new_start_date} in {state.store_name}. Anything else? 😊"
             elif update_field == "3":
                 new_end_date = state.collected_data["new_end_date"]
@@ -457,6 +460,7 @@ def execute_operation(state: TenantState) -> None:
                     "UPDATE offers SET end_date = %s WHERE offer_id = %s",
                     (new_end_date, offer_id)
                 )
+                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
                 state.response = f"Updated '{old_desc}' end date to {new_end_date} in {state.store_name}. Anything else? 😊"
         elif state.action == "delete":
             description = state.collected_data["description"]
@@ -468,6 +472,7 @@ def execute_operation(state: TenantState) -> None:
                 offer_id = offer["offer_id"]
                 db_execute("DELETE FROM offers WHERE offer_id = %s", (offer_id,))
                 index.delete(ids=[f"offer_{offer_id}_en"])
+                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
                 state.response = f"Removed '{description}' from {state.store_name}. Anything else? 😊"
             else:
                 state.response = f"Couldn’t find '{description}' in {state.store_name}. Want to list offers?"
@@ -502,6 +507,7 @@ def execute_operation(state: TenantState) -> None:
                         "lang": "en"
                     }
                 }])
+                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
                 state.response = f"Added '{name}' ({description or 'No description'}) to {state.store_name} for {price} {currency}. Anything else? 😊"
             else:
                 state.response = f"Failed to add '{name}'. Try again or contact support."
@@ -539,6 +545,7 @@ def execute_operation(state: TenantState) -> None:
                         "lang": "en"
                     }
                 }])
+                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
                 state.response = f"Updated '{old_name}' to '{new_name}' in {state.store_name}. Anything else? 😊"
             elif update_field == "2":
                 new_desc = state.collected_data["new_description"]
@@ -563,6 +570,7 @@ def execute_operation(state: TenantState) -> None:
                         "lang": "en"
                     }
                 }])
+                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
                 state.response = f"Updated '{old_name}' description to '{new_desc}' in {state.store_name}. Anything else? 😊"
             elif update_field == "3":
                 new_price = float(state.collected_data["new_price"])
@@ -587,6 +595,7 @@ def execute_operation(state: TenantState) -> None:
                         "lang": "en"
                     }
                 }])
+                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
                 state.response = f"Updated '{old_name}' price to {new_price} in {state.store_name}. Anything else? 😊"
             elif update_field == "4":
                 new_currency = state.collected_data["new_currency"]
@@ -611,6 +620,7 @@ def execute_operation(state: TenantState) -> None:
                         "lang": "en"
                     }
                 }])
+                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
                 state.response = f"Updated '{old_name}' currency to {new_currency} in {state.store_name}. Anything else? 😊"
         elif state.action == "delete":
             name = state.collected_data["name"]
@@ -622,6 +632,7 @@ def execute_operation(state: TenantState) -> None:
                 product_id = product["product_id"]
                 db_execute("DELETE FROM products WHERE product_id = %s", (product_id,))
                 index.delete(ids=[f"product_{product_id}_en"])
+                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
                 state.response = f"Removed '{name}' from {state.store_name}. Anything else? 😊"
             else:
                 state.response = f"Couldn’t find '{name}' in {state.store_name}. Want to list products?"
@@ -633,7 +644,7 @@ def execute_operation(state: TenantState) -> None:
     state.offer_list = None
 
 def tenant_recognize_intent(state: TenantState) -> TenantState:
-    conversation_history = get_conversation_history(state.session_id)
+    conversation_history = get_conversation_history(state.session_id)  # Still sync for tenant compatibility
     state.conversation_history = [{"role": msg.role, "content": msg.content} for msg in conversation_history]
     
     if not state.current_step:

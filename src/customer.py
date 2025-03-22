@@ -7,9 +7,10 @@ from langgraph.graph import StateGraph, END
 from datetime import datetime
 import json
 import os
+import asyncio
 from pinecone import Pinecone
 from langchain_huggingface import HuggingFaceEmbeddings
-from utils import db_fetch_all, db_fetch_one, convert_to_json_safe, DateTimeEncoder, logger
+from utils import db_fetch_all_async, db_fetch_one_async, convert_to_json_safe, DateTimeEncoder, REDIS_CLIENT, logger
 
 # Pinecone setup
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
@@ -95,10 +96,17 @@ class CustomerState(PydanticBaseModel):
     response: Optional[str] = None
     context_data: Optional[Dict[str, Any]] = None
 
-def retrieve_context(state: CustomerState) -> CustomerState:
+async def retrieve_context(state: CustomerState) -> CustomerState:
+    cache_key = f"context:{state.query}:{state.user_id or 'anon'}"
+    cached_context = REDIS_CLIENT.get(cache_key)
+    if cached_context:
+        state.context_data = json.loads(cached_context)
+        state.response = json.dumps(convert_to_json_safe(state.context_data))
+        return state
+
     mall_name = None
     query_lower = state.query.lower()
-    possible_malls = db_fetch_all("SELECT name_en, mall_id FROM malls")
+    possible_malls = await db_fetch_all_async("SELECT name_en, mall_id FROM malls")
     for mall in possible_malls:
         if mall["name_en"].lower() in query_lower:
             mall_name = mall["name_en"]
@@ -106,7 +114,10 @@ def retrieve_context(state: CustomerState) -> CustomerState:
     
     filter = None
     if mall_name:
-        mall = db_fetch_one("SELECT mall_id FROM malls WHERE name_en ILIKE %s", (mall_name,))
+        mall = await db_fetch_one_async(
+            "SELECT mall_id FROM malls WHERE name_en ILIKE $1",
+            (mall_name,)
+        )
         if mall:
             filter = {"mall_id": mall["mall_id"]}
 
@@ -117,13 +128,16 @@ def retrieve_context(state: CustomerState) -> CustomerState:
         if last_exchanges:
             query = f"{query} (Referring to: {last_exchanges[-1]['content']})"
     
-    query_vector = embeddings.embed_query(f"mall {query}")
-    search_params = {"vector": query_vector, "top_k": 15, "include_metadata": True}
-    if filter:
-        search_params["filter"] = filter
-    
-    results = index.query(**search_params)
-    docs = results["matches"] if "matches" in results else []
+    async def fetch_pinecone():
+        query_vector = embeddings.embed_query(f"mall {query}")
+        search_params = {"vector": query_vector, "top_k": 15, "include_metadata": True}
+        if filter:
+            search_params["filter"] = filter
+        results = index.query(**search_params)
+        return results["matches"] if "matches" in results else []
+
+    pinecone_task = asyncio.create_task(fetch_pinecone())
+    docs = await pinecone_task
     
     context = {
         "stores": [],
@@ -192,9 +206,10 @@ def retrieve_context(state: CustomerState) -> CustomerState:
                 store_ids.add(metadata["store_id"])
     
     if store_ids:
-        stores = db_fetch_all(
-            "SELECT store_id, name_en, location_en, category_en FROM stores WHERE store_id IN %s",
-            (tuple(store_ids),)
+        # Use $1 for the IN clause placeholder
+        stores = await db_fetch_all_async(
+            "SELECT store_id, name_en, location_en, category_en FROM stores WHERE store_id = ANY($1)",
+            (list(store_ids),)  # Convert set to list for asyncpg compatibility
         )
         store_map = {s["store_id"]: s for s in stores}
         for product in context["products"]:
@@ -210,22 +225,26 @@ def retrieve_context(state: CustomerState) -> CustomerState:
 
     if state.user_id and state.user_id.startswith("c_"):
         customer_id = state.user_id[2:]
-        customer = db_fetch_one("SELECT customer_id FROM customers WHERE customer_id = %s", (customer_id,))
+        customer = await db_fetch_one_async(
+            "SELECT customer_id FROM customers WHERE customer_id = $1",
+            (customer_id,)
+        )
         if customer:
-            loyalty = db_fetch_one(
+            loyalty = await db_fetch_one_async(
                 "SELECT cl.points_balance, lp.name_en, lp.description_en "
                 "FROM customer_loyalty cl "
                 "JOIN loyalty_programs lp ON cl.loyalty_id = lp.loyalty_id "
-                "WHERE cl.customer_id = %s",
+                "WHERE cl.customer_id = $1",
                 (customer_id,)
             )
             context["customer_loyalty"] = loyalty or {}
     
     state.context_data = context
     state.response = json.dumps(convert_to_json_safe(context))
+    REDIS_CLIENT.set(cache_key, json.dumps(state.context_data), ex=300)  # 5 min TTL
     return state
 
-def generate_response(state: CustomerState) -> CustomerState:
+async def generate_response(state: CustomerState) -> CustomerState:
     formatted_history = ""
     if state.conversation_history:
         formatted_history = "\n".join([
@@ -233,15 +252,13 @@ def generate_response(state: CustomerState) -> CustomerState:
             for msg in state.conversation_history[-6:]
         ])
     
-    response = customer_chain.invoke(
-        {
-            "context": state.response,
-            "query": state.query,
-            "lang": state.language,
-            "conversation_history": formatted_history,
-            "current_date": datetime.now().strftime("%Y-%m-%d")
-        }
-    )
+    response = await asyncio.to_thread(customer_chain.invoke, {
+        "context": state.response,
+        "query": state.query,
+        "lang": state.language,
+        "conversation_history": formatted_history,
+        "current_date": datetime.now().strftime("%Y-%m-%d")
+    })
     state.response = response
     return state
 
