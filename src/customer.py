@@ -53,26 +53,37 @@ async def populate_knowledge_graph():
 intent_classification_prompt = PromptTemplate(
     input_variables=["query", "conversation_history"],
     template="""
-    Classify the user's intent based on the query and conversation history.
-    Possible intents: store_info, product_info, offer_info, dining_info, service_info, amenity_info, event_info, navigation, general_inquiry, other.
-    - 'store_info': Queries about specific stores or categories (e.g., "jewelry stores").
-    - 'product_info': Queries about products or shopping lists (e.g., "I need a phone").
-    - 'offer_info': Queries about deals/offers (e.g., "do they have any offers?").
-    - Use history to refine intent (e.g., "they" refers to prior context).
-    - Default to 'general_inquiry' for vague queries.
+    You are CenomiAI, a mall assistant. Parse this query to determine the user's intent based on the query and conversation history.
+
+    Valid entities: store, offer, product, event, service, amenity
+    Valid actions: info, navigate, recommend, list
 
     Query: "{query}"
-    Conversation History:
+
+    Previous conversation:
     {conversation_history}
 
-    Respond with only the intent category.
+    Instructions:
+    - Use the conversation history to resolve vague terms like "it", "that", or "the store" to specific entities mentioned earlier.
+    - If the query is a follow-up (e.g., "Where is it?"), link it to the most recent entity from history.
+    - For broad queries (e.g., "What’s good here?"), assume 'recommend' or 'list' based on context.
+    - Extract specific details (e.g., store name) into collected_data.
+
+    Return a JSON object with:
+    - entity_type: What they’re asking about (store, offer, product, etc.)
+    - action: What they want (info, navigate, recommend, list)
+    - collected_data: Any details provided (e.g., "name": "Tiffany & Co.")
+
+    Example output:
+    ```json
+    {{"entity_type": "product", "action": "info", "collected_data": {{"name": "wedding ring"}}}}
     """
 )
 intent_chain = intent_classification_prompt | llm | StrOutputParser()
 
 # Customer Response Prompt
 customer_prompt = PromptTemplate(
-    input_variables=["context", "query", "lang", "conversation_history", "mall_name"],
+    input_variables=["context", "query", "lang", "conversation_history", "mall_name", "resolved_entity"],
     template="""
     You are CenomiAI, a friendly, proactive, and highly knowledgeable assistant for {mall_name} mall. 
     
@@ -82,8 +93,9 @@ customer_prompt = PromptTemplate(
     - Your purpose is to be the definitive source of information about {mall_name} mall
     
     # Context Awareness
-    - Always reference the most recent conversation history to maintain continuity
-    - When users refer to something previously mentioned ("it", "that store", "those products"), connect back to the specific items from earlier in the conversation
+    - Always reference the most recent conversation history to maintain continuity: {conversation_history}
+    - If a resolved entity is provided (e.g., "{resolved_entity}"), treat it as the subject of the query unless contradicted
+    - When users refer to something previously mentioned ("it", "that store", "those products"), connect back to the resolved entity or specific items from earlier in the conversation
     - If the user asks follow-up questions, ensure your answers build on previous exchanges rather than starting fresh
     - For multi-part questions, address each component thoroughly
     
@@ -166,11 +178,30 @@ class CustomerState(PydanticBaseModel):
 
 async def classify_intent(state: CustomerState) -> CustomerState:
     formatted_history = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in state.conversation_history[-6:]]) if state.conversation_history else "No prior conversation."
-    intent = await intent_chain.ainvoke({"query": state.query, "conversation_history": formatted_history})
-    state.intent = intent.strip()
-    if state.intent == "other":
-        state.response = "I’m not sure what you mean 😅. Could you tell me more? Are you asking about stores, offers, or something else?"
-    logger.info(f"Classified intent: {state.intent}")
+    intent_result = await intent_chain.ainvoke({"query": state.query, "conversation_history": formatted_history})
+    logger.info(f"Raw intent_result: '{intent_result}'")
+    
+    cleaned_result = intent_result.strip()
+    if cleaned_result.startswith("```json") and cleaned_result.endswith("```"):
+        cleaned_result = cleaned_result[7:-3].strip()
+    elif cleaned_result.startswith("```") and cleaned_result.endswith("```"):
+        cleaned_result = cleaned_result[3:-3].strip()
+    
+    try:
+        intent_json = json.loads(cleaned_result)
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse intent_result as JSON: '{cleaned_result}', Error: {e}")
+        state.intent = "other_info"
+        state.response = "I’m having trouble understanding that 😅. Could you clarify what you’re asking about?"
+        return state
+
+    state.intent = f"{intent_json['entity_type']}_{intent_json['action']}"
+    state.context_data = state.context_data or {}
+    if intent_json["collected_data"].get("name"):
+        state.context_data["resolved_entity"] = intent_json["collected_data"]["name"]
+    if state.intent.startswith("other_"):
+        state.response = "I’m not sure what you mean 😅. Could you tell me more?"
+    logger.info(f"Classified intent: {state.intent}, Resolved entity: {state.context_data.get('resolved_entity')}")
     return state
 
 async def initial_retrieval(state: CustomerState) -> CustomerState:
@@ -187,17 +218,27 @@ async def initial_retrieval(state: CustomerState) -> CustomerState:
     query_items = [item.strip() for item in state.query.split("\n") if item.strip()] if "\n" in state.query else [state.query]
     intent_prefixes = {
         "store_info": "store",
+        "store_navigate": "store",
+        "store_recommend": "store",
+        "store_list": "store",
         "product_info": "product",
+        "product_recommend": "product",
+        "product_list": "product",
         "offer_info": "offer",
-        "dining_info": "dining",
-        "service_info": "service",
-        "amenity_info": "amenity",
+        "offer_recommend": "offer",
+        "offer_list": "offer",
         "event_info": "event",
-        "navigation": "navigation",
-        "general_inquiry": "mall",
-        "other": "mall",
+        "event_recommend": "event",
+        "event_list": "event",
+        "service_info": "service",
+        "service_recommend": "service",
+        "service_list": "service",
+        "amenity_info": "amenity",
+        "amenity_navigate": "amenity",
+        "amenity_list": "amenity",
     }
-    query_prefix = intent_prefixes.get(state.intent, "mall")
+    entity_type = state.intent.split("_")[0]
+    query_prefix = intent_prefixes.get(state.intent, entity_type)
 
     # Extract store name or category
     store_name, category = None, None
@@ -265,7 +306,7 @@ async def refine_context(state: CustomerState) -> CustomerState:
     context["mall_name"] = mall["name_en"] if mall else "Unknown Mall"
 
     # Fetch offers explicitly for offer_info intent
-    if state.intent == "offer_info":
+    if state.intent.startswith("offer_"):
         offers = await db_fetch_all_async(
             "SELECT o.offer_id, o.description_en, o.store_id "
             "FROM offers o "
@@ -374,6 +415,7 @@ async def generate_response(state: CustomerState) -> CustomerState:
             "lang": state.language,
             "conversation_history": formatted_history,
             "mall_name": state.context_data.get("mall_name", "the mall"),
+            "resolved_entity": state.context_data.get("resolved_entity", ""),
         },
     )
     state.response = response
@@ -388,7 +430,7 @@ customer_workflow.add_node("respond", generate_response)
 customer_workflow.set_entry_point("classify_intent")
 customer_workflow.add_conditional_edges(
     "classify_intent",
-    lambda state: "respond" if state.intent == "other" and state.response else "initial_retrieval",
+    lambda state: "respond" if state.intent.startswith("other_") and state.response else "initial_retrieval",
 )
 customer_workflow.add_edge("initial_retrieval", "refine_context")
 customer_workflow.add_edge("refine_context", "respond")
