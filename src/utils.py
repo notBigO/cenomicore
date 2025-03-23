@@ -185,5 +185,5 @@ async def get_conversation_history(session_id: str, max_messages: int = 10) -> L
         Message(role=msg["role"], content=msg["content"], timestamp=msg["timestamp"])
         for msg in reversed(messages)
     ]
-    REDIS_CLIENT.set(cache_key, json.dumps([msg.dict() for msg in history]), ex=300)  # 5 min TTL
+    REDIS_CLIENT.set(cache_key, json.dumps([msg.dict() for msg in history], cls=DateTimeEncoder), ex=300)
     return history

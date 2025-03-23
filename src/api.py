@@ -3,14 +3,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
 import asyncio
-from utils import detect_language, get_or_create_session, get_conversation_history, add_message_to_conversation, db_fetch_one, db_execute_async, DateTimeEncoder, logger
+from utils import detect_language, get_or_create_session, get_conversation_history, add_message_to_conversation, db_fetch_one, db_execute_async, DateTimeEncoder, logger, db_fetch_one_async
 from customer import CustomerState, customer_graph
 from tenant import TenantState, tenant_graph
 from typing import Optional
 from langsmith import Client
-# Option 1: Try importing trace directly from langsmith
 from langsmith import trace
 import os
+from customer import populate_knowledge_graph
 
 app = FastAPI()
 app.add_middleware(
@@ -20,6 +20,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Starting up FastAPI application...")
+    await populate_knowledge_graph()
 
 # LangSmith setup
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
@@ -62,14 +67,35 @@ async def login(request: LoginRequest):
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     lang = request.language or detect_language(request.text)
+    
+    # Ensure session exists in the conversations table
     session_id = await get_or_create_session(request.session_id, request.user_id, lang)
+    
+    # Verify session exists in the database
+    session_check = await db_fetch_one_async(
+        "SELECT session_id FROM conversations WHERE session_id = $1",
+        (session_id,)
+    )
+    if not session_check:
+        # If session doesn’t exist, explicitly insert it
+        await db_execute_async(
+            "INSERT INTO conversations (session_id, user_id, language, current_state) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+            (session_id, request.user_id, lang, json.dumps({}))
+        )
+        logger.info(f"Created new session in conversations table: {session_id}")
+    
+    # Fetch conversation history
     conversation_history = await get_conversation_history(session_id)
     history_dicts = [{"role": msg.role, "content": msg.content} for msg in conversation_history]
     
-    conv_state = db_fetch_one("SELECT current_state FROM conversations WHERE session_id = %s", (session_id,))
+    # Load or initialize state
+    conv_state = await db_fetch_one_async(
+        "SELECT current_state FROM conversations WHERE session_id = $1",
+        (session_id,)
+    )
     if conv_state and conv_state.get("current_state"):
         try:
-            state_dict = conv_state["current_state"]
+            state_dict = json.loads(conv_state["current_state"])
             state = CustomerState(**state_dict)
             state.query = request.text
             state.conversation_history = history_dicts
@@ -79,19 +105,27 @@ async def chat(request: ChatRequest):
     else:
         state = CustomerState(query=request.text, user_id=request.user_id, language=lang, session_id=session_id, conversation_history=history_dicts)
 
-    
+    # Process the request
     with trace(name="CustomerChat", inputs={"query": request.text, "user_id": request.user_id}):
         result = await customer_graph.ainvoke(state)
-        
     
+    # Update conversation history in the result
+    result["conversation_history"] = history_dicts + [
+        {"role": "user", "content": request.text},
+        {"role": "assistant", "content": result["response"]}
+    ]
+    
+    # Save updated state
     state_json = json.dumps(result, cls=DateTimeEncoder)
     await db_execute_async(
         "UPDATE conversations SET current_state = $1 WHERE session_id = $2",
         (state_json, session_id)
     )
     
+    # Add messages to conversation_messages table
     await add_message_to_conversation(session_id, "user", request.text)
     await add_message_to_conversation(session_id, "assistant", result["response"])
+    
     return ChatResponse(message=result["response"], session_id=session_id)
 
 @app.post("/tenant/update")

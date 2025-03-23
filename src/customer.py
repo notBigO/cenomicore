@@ -11,6 +11,7 @@ import asyncio
 from pinecone import Pinecone
 from langchain_huggingface import HuggingFaceEmbeddings
 from utils import db_fetch_all_async, db_fetch_one_async, convert_to_json_safe, DateTimeEncoder, REDIS_CLIENT, logger
+import networkx as nx
 
 # Pinecone setup
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
@@ -24,55 +25,75 @@ embeddings = HuggingFaceEmbeddings(model_name='paraphrase-multilingual-MiniLM-L1
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", api_key=GEMINI_API_KEY)
 
-# Customer prompt template
+# Knowledge Graph setup
+knowledge_graph = nx.Graph()
+
+async def populate_knowledge_graph():
+    stores = await db_fetch_all_async("SELECT store_id, name_en FROM stores")
+    products = await db_fetch_all_async("SELECT product_id, name_en, store_id FROM products")
+    offers = await db_fetch_all_async("SELECT offer_id, description_en, store_id FROM offers")
+    
+    for store in stores:
+        knowledge_graph.add_node(f"store_{store['store_id']}", type="store", name=store["name_en"])
+    for product in products:
+        knowledge_graph.add_node(f"product_{product['product_id']}", type="product", name=product["name_en"])
+        knowledge_graph.add_edge(f"store_{product['store_id']}", f"product_{product['product_id']}")
+    for offer in offers:
+        knowledge_graph.add_node(f"offer_{offer['offer_id']}", type="offer", description=offer["description_en"])
+        knowledge_graph.add_edge(f"store_{offer['store_id']}", f"offer_{offer['offer_id']}")
+
+# Intent Classification Prompt
+intent_classification_prompt = PromptTemplate(
+    input_variables=["query", "conversation_history"],
+    template="""
+    Classify the user's intent based on the query and conversation history.
+    Possible intents: store_info, product_info, offer_info, dining_info, service_info, amenity_info, event_info, navigation, general_inquiry, other.
+    - If the query involves a list of items to buy, classify as 'product_info'.
+    - If the query is about finding stores without specific products, classify as 'store_info'.
+    - If the query is vague or broad (e.g., "plan my day"), classify as 'general_inquiry'.
+
+    Query: "{query}"
+
+    Conversation History:
+    {conversation_history}
+
+    Respond with only the intent category.
+    """
+)
+intent_chain = intent_classification_prompt | llm | StrOutputParser()
+
+# Customer Prompt Template (Tweaked)
 customer_prompt = PromptTemplate(
     input_variables=["context", "query", "lang", "conversation_history"],
     template="""
-    You are CenomiAI, a friendly and highly knowledgeable mall assistant designed to enhance the shopping experience. Respond in {lang} with a warm, conversational tone, using emojis 😊 to keep it engaging. Your sole purpose is to assist with mall-related inquiries—stores, products, dining, services, amenities, events, offers, navigation, and more—while staying strictly within the mall context. Use the query, context, and conversation history to provide accurate, detailed, and tailored responses. If unsure or lacking info, ask clarifying questions or suggest helpful next steps while maintaining a supportive vibe.
+    You are CenomiAI, a friendly, proactive, and highly knowledgeable mall assistant designed to elevate the shopping experience. Respond in {lang} with a warm, conversational tone, using emojis 😊 to keep it engaging. Your purpose is to assist with mall-related inquiries—stores, products, dining, services, amenities, events, offers, navigation, and more—staying strictly within the mall context. Assume the customer knows little about the mall and may ask diverse, vague, or list-based questions. Use the query, context, and conversation history to craft accurate, detailed, and tailored responses that anticipate their needs, weaving in relevant suggestions naturally. If info is missing, make smart assumptions based on context/history or provide general mall guidance while keeping it supportive and fun.
 
     Response Guidelines:
-    - Store Queries: 
-      - Share specifics: store name, exact location (floor, nearby landmarks), hours, and offerings (e.g., products, brands, in-store cafes).
-      - For category queries (e.g., "clothing stores"), list relevant options with locations and tailor to preferences (e.g., budget, style).
-
-    - Product Queries: 
-      - Address availability, brands, or types (e.g., "Does Zara have dresses?") with store suggestions and details if known.
-      - If vague (e.g., "I need a gift"), ask about recipient or budget, then recommend stores or items.
-
-    - Dining: 
-      - Suggest options by cuisine, vibe (e.g., quick bites, date-night spots), or dietary needs (e.g., vegan, kid-friendly), including locations and highlights.
-
-    - Services & Amenities: 
-      - Provide directions to restrooms, ATMs, parking, play areas, etc., with practical details (e.g., "wheelchairs at info desk, Level 1").
-      - Explain policies (e.g., Wi-Fi access, pet rules) or accessibility features.
-
-    - Offers & Events: 
-      - Detail current promotions (e.g., discounts, BOGO) or events (e.g., date, time, location), even suggesting upcoming ones if relevant.
-      - For vague queries (e.g., "What’s happening?"), highlight popular options or ask for preferences.
-
-    - Navigation: 
-      - Offer clear, concise directions (e.g., "Food court’s on Level 2, left of the escalators") based on assumed or stated location.
-      - Handle vague requests (e.g., "I’m lost") by asking for nearby landmarks or suggesting the info desk.
-
-    - Vague or Emotional Queries: 
-      - Interpret intent creatively: "I’m bored" → entertainment options; "I’m on a date" → romantic dining or activities; "I’m with kids" → family-friendly spots.
-      - Ask follow-ups if needed (e.g., "What do you feel like doing? Shopping, eating, or fun?").
-
-    - Personalization: 
-      - Use `user_id` for loyalty details (points, perks) if provided, otherwise explain generic program benefits.
-      - Tailor suggestions to context (e.g., time-sensitive events, group dynamics).
-
-    - Limitations: 
-      - If context lacks details, say: "I’m digging for that info 😅! Can you tell me more (e.g., which store or area) to help me out?"
-      - Politely deflect non-mall topics: "I’m all about the mall—ask me anything from stores to events!"
+    - Store Queries: Share specifics (name, exact location, offerings). For categories (e.g., "clothing"), list tailored options with locations.
+    - Product Queries (including lists): For each item, match to specific stores/products/offers from context. If unavailable, suggest likely store types (e.g., "pharmacies for diapers") with locations if known. Structure as a numbered list matching the query.
+    - Dining: Recommend by cuisine/vibe/needs (e.g., snacks, romantic) with locations and highlights.
+    - Offers & Events: Highlight current promotions/events tied to query items, with dates/locations.
+    - Navigation: Provide clear directions from an assumed start (e.g., main entrance) or context.
+    - Vague/List Queries: 
+      - For lists (e.g., "diapers, jacket"), create a structured shopping plan with stores/products/offers, numbered to match the query.
+      - "I’m proposing" → romantic plan (dinner, ring, spot).
+      - "I’m with kids" → family itinerary.
+      - "I need a break" → relaxation plan (spa, snacks, park).
+      - "I’m hungry" → dining options.
+      - "My phone’s dead" → suggest charging/tech stores.
+      - "Plan my day" → full itinerary (shopping, food, fun).
+      - "I’m lost" → guide to main attractions or customer service.
+      - Minimize questions—assume intent and adjust later.
+    - Personalization: Use `user_id` for loyalty perks; tailor to context (e.g., wedding ring → proposal ideas).
+    - Suggestions: Integrate relevant offers/products (e.g., "At X, grab their 40% off deal!") seamlessly into the response.
 
     Instructions:
-    - Context: Leverage provided data (e.g., store locations, event times) for precision. If empty, rely on general mall knowledge or seek clarification.
-    - History: Reference past exchanges for continuity (e.g., "You asked about shoes earlier—want directions to Foot Locker?").
-    - Tone: Be concise yet rich in detail, avoiding jargon. Sound like a friend who knows the mall inside out.
-    - Read-Only: Don’t offer to change data—just inform and assist based on what’s available.
-    - Out-of-Scope: For non-mall queries, gently redirect: "I’m your mall expert—got any questions about here?"
-    - Continuity: If the user is following up on a previous question with pronouns like "it", "they", "that store", etc., use conversation history to understand what they're referring to.
+    - Context: Use all provided data (stores, products, offers) for precision. If sparse, leverage general mall knowledge (e.g., "jewelry stores on Level 1").
+    - History: Reference past exchanges for continuity (e.g., "You mentioned snacks earlier…").
+    - Tone: Be detailed, concise, and friendly—like a mall-savvy friend. Avoid jargon.
+    - Proactive Planning: For lists or open-ended queries, propose a clear, delightful plan.
+    - Continuity: Resolve pronouns (e.g., "them") using query/history.
+    - Formatting: Use plain text with "- " for bullets, no Markdown (*).
 
     Current Query:
     "{query}"
@@ -84,7 +105,6 @@ customer_prompt = PromptTemplate(
     {conversation_history}
     """
 )
-
 customer_chain = customer_prompt | llm | StrOutputParser()
 
 class CustomerState(PydanticBaseModel):
@@ -95,177 +115,187 @@ class CustomerState(PydanticBaseModel):
     conversation_history: List[Dict[str, str]] = []
     response: Optional[str] = None
     context_data: Optional[Dict[str, Any]] = None
+    intent: Optional[str] = None
+    initial_context: Optional[List[Dict[str, Any]]] = None
+    suggestions: Optional[List[str]] = None
 
-async def retrieve_context(state: CustomerState) -> CustomerState:
-    cache_key = f"context:{state.query}:{state.user_id or 'anon'}"
+async def classify_intent(state: CustomerState) -> CustomerState:
+    formatted_history = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in state.conversation_history[-4:]]) if state.conversation_history else ""
+    intent = await intent_chain.ainvoke({"query": state.query, "conversation_history": formatted_history})
+    state.intent = intent.strip()
+    if state.intent == "other":
+        state.response = "I’m not sure what you mean 😅. Could you tell me more? Are you asking about stores, dining, or something else?"
+    logger.info(f"Classified intent: {state.intent}")
+    return state
+
+async def initial_retrieval(state: CustomerState) -> CustomerState:
+    cache_key = f"initial_context:{state.query}:{state.intent}:{state.user_id or 'anon'}"
     cached_context = REDIS_CLIENT.get(cache_key)
     if cached_context:
-        state.context_data = json.loads(cached_context)
-        state.response = json.dumps(convert_to_json_safe(state.context_data))
+        state.initial_context = json.loads(cached_context)
         return state
 
-    mall_name = None
-    query_lower = state.query.lower()
-    possible_malls = await db_fetch_all_async("SELECT name_en, mall_id FROM malls")
-    for mall in possible_malls:
-        if mall["name_en"].lower() in query_lower:
-            mall_name = mall["name_en"]
-            break
-    
-    filter = None
-    if mall_name:
-        mall = await db_fetch_one_async(
-            "SELECT mall_id FROM malls WHERE name_en ILIKE $1",
-            (mall_name,)
-        )
-        if mall:
-            filter = {"mall_id": mall["mall_id"]}
-
-    query = state.query
-    history = state.conversation_history
-    if history and any(word in query_lower for word in ["it", "they", "that", "this", "there", "those"]):
-        last_exchanges = [msg for msg in history[-4:] if msg["role"] == "assistant"]
-        if last_exchanges:
-            query = f"{query} (Referring to: {last_exchanges[-1]['content']})"
-    
-    async def fetch_pinecone():
-        query_vector = embeddings.embed_query(f"mall {query}")
-        search_params = {"vector": query_vector, "top_k": 15, "include_metadata": True}
-        if filter:
-            search_params["filter"] = filter
-        results = index.query(**search_params)
-        return results["matches"] if "matches" in results else []
-
-    pinecone_task = asyncio.create_task(fetch_pinecone())
-    docs = await pinecone_task
-    
-    context = {
-        "stores": [],
-        "offers": [],
-        "events": [],
-        "services": [],
-        "amenities": [],
-        "products": [],
-        "loyalty_programs": [],
-        "customer_loyalty": []
+    query_items = [item.strip() for item in state.query.split("\n") if item.strip()] if "\n" in state.query else [state.query]
+    intent_prefixes = {
+        "store_info": "store", "product_info": "product", "offer_info": "offer",
+        "dining_info": "dining", "service_info": "service", "amenity_info": "amenity",
+        "event_info": "event", "navigation": "navigation", "general_inquiry": "mall", "other": "mall"
     }
-    store_ids = set()
+    query_prefix = intent_prefixes.get(state.intent, "mall")
     
-    for doc in docs:
+    # Extract store name if present
+    store_name = None
+    for item in query_items:
+        if "does" in item.lower() and "sell" in item.lower():
+            words = item.lower().split()
+            store_idx = words.index("does") - 1
+            if store_idx >= 0:
+                store_name = words[store_idx]
+                break
+
+    # Refine query for store-specific products
+    if store_name:
+        query_vectors = [embeddings.embed_query(f"{query_prefix} {store_name} products")]
+        # Direct DB fetch for store-specific products
+        store = await db_fetch_one_async("SELECT store_id FROM stores WHERE name_en ILIKE $1", (store_name,))
+        if store:
+            products = await db_fetch_all_async(
+                "SELECT product_id, name_en, description_en, price, currency FROM products WHERE store_id = $1",
+                (store["store_id"],)
+            )
+            state.context_data = state.context_data or {"products": []}
+            state.context_data["products"] = [
+                {"name": p["name_en"], "description": p["description_en"], "price": p["price"], "currency": p["currency"], "store_id": store["store_id"]}
+                for p in products
+            ]
+    else:
+        query_vectors = [embeddings.embed_query(f"{query_prefix} {item}") for item in query_items]
+    
+    avg_vector = [sum(v[i] for v in query_vectors) / len(query_vectors) for i in range(len(query_vectors[0]))]
+
+    # Mall filter
+    mall_name = next((m["name_en"] for m in await db_fetch_all_async("SELECT name_en FROM malls") if m["name_en"].lower() in state.query.lower()), None)
+    filter = {"mall_id": (await db_fetch_one_async("SELECT mall_id FROM malls WHERE name_en ILIKE $1", (mall_name,)))["mall_id"]} if mall_name else None
+
+    # Enhance with history
+    if state.conversation_history and any(word in state.query.lower() for word in ["it", "they", "that", "this", "there", "those", "meant"]):
+        last_response = next((msg["content"] for msg in reversed(state.conversation_history[-4:]) if msg["role"] == "assistant"), "")
+        if last_response:
+            history_vector = embeddings.embed_query(last_response)
+            avg_vector = [(a + h) / 2 for a, h in zip(avg_vector, history_vector)]
+
+    # Fetch from Pinecone
+    results = await asyncio.to_thread(index.query, vector=avg_vector, top_k=25, include_metadata=True, filter=filter)
+    docs = results["matches"] if "matches" in results else []
+
+    state.initial_context = [{"id": doc["id"], "score": float(doc["score"]), "metadata": doc["metadata"]} for doc in docs]
+    REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
+    return state
+
+async def refine_context(state: CustomerState) -> CustomerState:
+    context = {"stores": [], "offers": [], "events": [], "services": [], "amenities": [], "products": [], "loyalty_programs": [], "customer_loyalty": []}
+    store_ids = set()
+
+    # Process all initial context, no intent filtering
+    for doc in state.initial_context:
         metadata = doc["metadata"]
         doc_type = metadata.get("type")
         if doc_type == "store":
-            store = {
-                "name": metadata.get("name_en"),
-                "location": metadata.get("location_en"),
-                "category": metadata.get("category_en")
-            }
-            context["stores"].append(store)
+            store = {"name": metadata.get("name_en"), "location": metadata.get("location_en"), "category": metadata.get("category_en"), "store_id": metadata.get("id")}
+            if store not in context["stores"]:
+                context["stores"].append(store)
         elif doc_type == "offer":
-            offer = {
-                "description": metadata.get("description_en"),
-                "id": metadata.get("id"),
-                "store_id": metadata.get("store_id"),
-                "store_name": metadata.get("store_name"),
-                "location_en": metadata.get("location_en")
-            }
+            offer = {"description": metadata.get("description_en"), "id": metadata.get("id"), "store_id": metadata.get("store_id"), "store_name": metadata.get("store_name"), "location_en": metadata.get("location_en")}
             context["offers"].append(offer)
             if metadata.get("store_id"):
                 store_ids.add(metadata["store_id"])
-        elif doc_type == "event":
-            event = {
-                "name": metadata.get("name_en"),
-                "date": metadata.get("start_time"),
-                "location": metadata.get("location_en")
-            }
-            context["events"].append(event)
-        elif doc_type == "service":
-            service = {
-                "name": metadata.get("name_en"),
-                "description": metadata.get("description_en")
-            }
-            context["services"].append(service)
-        elif doc_type == "amenity":
-            amenity = {
-                "name": metadata.get("name_en"),
-                "location": metadata.get("location_en")
-            }
-            context["amenities"].append(amenity)
         elif doc_type == "product":
-            product = {
-                "name": metadata.get("name_en"),
-                "description": metadata.get("description_en"),
-                "price": metadata.get("price"),
-                "currency": metadata.get("currency"),
-                "store_id": metadata.get("store_id"),
-                "store_name": metadata.get("store_name"),
-                "location_en": metadata.get("location_en")
-            }
+            product = {"name": metadata.get("name_en"), "description": metadata.get("description_en"), "price": metadata.get("price"), "currency": metadata.get("currency"), "store_id": metadata.get("store_id"), "store_name": metadata.get("store_name"), "location_en": metadata.get("location_en")}
             context["products"].append(product)
             if metadata.get("store_id"):
                 store_ids.add(metadata["store_id"])
-    
+        elif doc_type == "event":
+            context["events"].append({"name": metadata.get("name_en"), "date": metadata.get("start_time"), "location": metadata.get("location_en")})
+        elif doc_type == "service":
+            context["services"].append({"name": metadata.get("name_en"), "description": metadata.get("description_en")})
+        elif doc_type == "amenity":
+            context["amenities"].append({"name": metadata.get("name_en"), "location": metadata.get("location_en")})
+
+    # Fetch store details
     if store_ids:
-        # Use $1 for the IN clause placeholder
-        stores = await db_fetch_all_async(
-            "SELECT store_id, name_en, location_en, category_en FROM stores WHERE store_id = ANY($1)",
-            (list(store_ids),)  # Convert set to list for asyncpg compatibility
-        )
+        stores = await db_fetch_all_async("SELECT store_id, name_en, location_en, category_en FROM stores WHERE store_id = ANY($1)", (list(store_ids),))
         store_map = {s["store_id"]: s for s in stores}
-        for product in context["products"]:
-            if not product.get("store_name") and product.get("store_id") in store_map:
-                store = store_map[product["store_id"]]
-                product["store_name"] = store["name_en"]
-                product["location_en"] = store["location_en"]
-        for offer in context["offers"]:
-            if not offer.get("store_name") and offer.get("store_id") in store_map:
-                store = store_map[offer["store_id"]]
-                offer["store_name"] = store["name_en"]
-                offer["location_en"] = store["location_en"]
+        for item in context["products"] + context["offers"]:
+            if item.get("store_id") in store_map and not item.get("store_name"):
+                store = store_map[item["store_id"]]
+                item["store_name"] = store["name_en"]
+                item["location_en"] = store["location_en"]
+                item["category"] = store["category_en"]
 
     if state.user_id and state.user_id.startswith("c_"):
         customer_id = state.user_id[2:]
-        customer = await db_fetch_one_async(
-            "SELECT customer_id FROM customers WHERE customer_id = $1",
+        loyalty = await db_fetch_one_async(
+            "SELECT cl.points_balance, lp.name_en, lp.description_en FROM customer_loyalty cl JOIN loyalty_programs lp ON cl.loyalty_id = lp.loyalty_id WHERE cl.customer_id = $1",
             (customer_id,)
         )
-        if customer:
-            loyalty = await db_fetch_one_async(
-                "SELECT cl.points_balance, lp.name_en, lp.description_en "
-                "FROM customer_loyalty cl "
-                "JOIN loyalty_programs lp ON cl.loyalty_id = lp.loyalty_id "
-                "WHERE cl.customer_id = $1",
-                (customer_id,)
-            )
-            context["customer_loyalty"] = loyalty or {}
-    
+        context["customer_loyalty"] = loyalty or {}
+
     state.context_data = context
     state.response = json.dumps(convert_to_json_safe(context))
-    REDIS_CLIENT.set(cache_key, json.dumps(state.context_data), ex=300)  # 5 min TTL
+    return state
+
+async def suggest_related(state: CustomerState) -> CustomerState:
+    suggestions = []
+    if state.context_data:
+        for product in state.context_data.get("products", []):
+            if "id" in product:
+                product_id = f"product_{product['id']}"
+                if knowledge_graph.has_node(product_id):
+                    related_offers = [n for n in knowledge_graph.neighbors(product_id) if n.startswith("offer_")][:2]
+                    for offer_id in related_offers:
+                        offer_data = knowledge_graph.nodes[offer_id]
+                        suggestions.append(f"While checking out {product['name']} at {product['store_name']}, grab this deal: {offer_data['description']}!")
+        
+        for offer in state.context_data.get("offers", []):
+            if "id" in offer:
+                offer_id = f"offer_{offer['id']}"
+                if knowledge_graph.has_node(offer_id):
+                    related_products = [n for n in knowledge_graph.neighbors(offer_id) if n.startswith("product_")][:2]
+                    for product_id in related_products:
+                        product_data = knowledge_graph.nodes[product_id]
+                        suggestions.append(f"Pair this offer ({offer['description']}) with {product_data['name']} at {offer['store_name']}!")
+    
+    state.suggestions = suggestions[:3]
     return state
 
 async def generate_response(state: CustomerState) -> CustomerState:
-    formatted_history = ""
-    if state.conversation_history:
-        formatted_history = "\n".join([
-            f"{msg['role'].upper()}: {msg['content']}" 
-            for msg in state.conversation_history[-6:]
-        ])
+    formatted_history = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in state.conversation_history[-6:]]) if state.conversation_history else "No prior conversation."
+    context_with_suggestions = state.response or "Limited context available—making the best of it!"
+    if state.suggestions:
+        context_with_suggestions += "\n\nRelated Suggestions:\n" + "\n".join(state.suggestions)
     
     response = await asyncio.to_thread(customer_chain.invoke, {
-        "context": state.response,
+        "context": context_with_suggestions,
         "query": state.query,
         "lang": state.language,
         "conversation_history": formatted_history,
-        "current_date": datetime.now().strftime("%Y-%m-%d")
+        "current_date": datetime.now().strftime("%Y-%m-%d"),
+        "user_id": state.user_id
     })
     state.response = response
     return state
 
+# Workflow
 customer_workflow = StateGraph(CustomerState)
-customer_workflow.add_node("retrieve", retrieve_context)
+customer_workflow.add_node("classify_intent", classify_intent)
+customer_workflow.add_node("initial_retrieval", initial_retrieval)
+customer_workflow.add_node("refine_context", refine_context)
+customer_workflow.add_node("suggest_related", suggest_related)
 customer_workflow.add_node("respond", generate_response)
-customer_workflow.set_entry_point("retrieve")
-customer_workflow.add_edge("retrieve", "respond")
+customer_workflow.set_entry_point("classify_intent")
+customer_workflow.add_conditional_edges("classify_intent", lambda state: "respond" if state.intent == "other" and state.response else "initial_retrieval")
+customer_workflow.add_edge("initial_retrieval", "refine_context")
+customer_workflow.add_edge("refine_context", "suggest_related")
+customer_workflow.add_edge("suggest_related", "respond")
 customer_workflow.add_edge("respond", END)
 customer_graph = customer_workflow.compile()
