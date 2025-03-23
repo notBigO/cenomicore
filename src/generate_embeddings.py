@@ -4,7 +4,7 @@ from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 import os
 from decimal import Decimal
-from datetime import date, time
+from datetime import date, time, datetime
 
 # Load environment variables
 load_dotenv()
@@ -26,7 +26,7 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 pc = Pinecone(api_key=PINECONE_API_KEY)
 
 # Check if index exists and create it if not
-INDEX_NAME = "cenomi"
+INDEX_NAME = "cenomicore"
 if INDEX_NAME not in pc.list_indexes().names():
     pc.create_index(
         name=INDEX_NAME,
@@ -40,19 +40,29 @@ index = pc.Index(INDEX_NAME)
 model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
 
 # Function to connect to PostgreSQL and fetch data
-def fetch_data(query):
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)  # type: ignore
-        cur = conn.cursor()
-        cur.execute(query)
-        rows = cur.fetchall()
-        columns = [desc[0] for desc in cur.description]
-        cur.close()
-        conn.close()
-        return [dict(zip(columns, row)) for row in rows]
-    except Exception as e:
-        print(f"Database error: {e}")
-        return []
+def fetch_data(query, batch_size=100):
+    all_data = []
+    offset = 0
+    while True:
+        paginated_query = f"{query} LIMIT {batch_size} OFFSET {offset}"
+        try:
+            conn = psycopg2.connect(**DB_CONFIG)
+            cur = conn.cursor()
+            cur.execute(paginated_query)
+            rows = cur.fetchall()
+            if not rows:
+                break
+            columns = [desc[0] for desc in cur.description]
+            batch = [dict(zip(columns, row)) for row in rows]
+            all_data.extend(batch)
+            print(f"Fetched {len(batch)} rows at offset {offset}, total so far: {len(all_data)}")
+            offset += batch_size
+            cur.close()
+            conn.close()
+        except Exception as e:
+            print(f"Database error at offset {offset}: {e}")
+            break
+    return all_data
 
 def convert_metadata(metadata):
     converted = {}
@@ -61,20 +71,18 @@ def convert_metadata(metadata):
             converted[key] = ""
         elif isinstance(value, Decimal):
             converted[key] = float(value)
-        elif isinstance(value, (date, time)):
-            converted[key] = str(value)
+        elif isinstance(value, (date, time, datetime)):
+            converted[key] = value.isoformat()
         else:
             converted[key] = value
     return converted
 
-# Function to generate and upsert embeddings
 def upsert_embeddings(data, id_prefix, text_field_en, text_field_ar, metadata_fields):
     vectors = []
     for item in data:
         text_en = item[text_field_en] if item[text_field_en] is not None else ""
         text_ar = item[text_field_ar] if item[text_field_ar] is not None else ""
 
-        # English embedding
         embedding_en = model.encode(text_en).tolist()
         vector_id_en = f"{id_prefix}_{item['id']}_en"
         metadata_en = {k: item[k] for k in metadata_fields if k in item}
@@ -82,7 +90,6 @@ def upsert_embeddings(data, id_prefix, text_field_en, text_field_ar, metadata_fi
         metadata_en = convert_metadata(metadata_en)
         vectors.append({"id": vector_id_en, "values": embedding_en, "metadata": metadata_en})
 
-        # Arabic embedding
         embedding_ar = model.encode(text_ar).tolist()
         vector_id_ar = f"{id_prefix}_{item['id']}_ar"
         metadata_ar = {k: item[k] for k in metadata_fields if k in item}
@@ -90,7 +97,6 @@ def upsert_embeddings(data, id_prefix, text_field_en, text_field_ar, metadata_fi
         metadata_ar = convert_metadata(metadata_ar)
         vectors.append({"id": vector_id_ar, "values": embedding_ar, "metadata": metadata_ar})
 
-    # Upsert to Pinecone in batches
     batch_size = 100
     try:
         for i in range(0, len(vectors), batch_size):

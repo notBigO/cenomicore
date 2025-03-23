@@ -14,7 +14,7 @@ from utils import db_fetch_one, db_fetch_all, db_execute, convert_to_json_safe, 
 # Pinecone setup
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 pc = Pinecone(api_key=PINECONE_API_KEY)
-index = pc.Index("cenomi")
+index = pc.Index("cenomicore")
 
 # Embeddings
 embeddings = HuggingFaceEmbeddings(model_name='paraphrase-multilingual-MiniLM-L12-v2')

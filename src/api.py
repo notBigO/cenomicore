@@ -2,8 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
-import asyncio
-from utils import detect_language, get_or_create_session, get_conversation_history, add_message_to_conversation, db_fetch_one, db_execute_async, DateTimeEncoder, logger, db_fetch_one_async
+from utils import detect_language, get_or_create_session, db_fetch_all,get_conversation_history, add_message_to_conversation, db_fetch_one, db_execute_async, DateTimeEncoder, logger, db_fetch_one_async
 from customer import CustomerState, customer_graph
 from tenant import TenantState, tenant_graph
 from typing import Optional
@@ -37,6 +36,7 @@ class ChatRequest(BaseModel):
     user_id: Optional[str] = None
     language: Optional[str] = None
     session_id: Optional[str] = None
+    mall_id: Optional[int] = None
 
 class ChatResponse(BaseModel):
     message: str
@@ -67,65 +67,83 @@ async def login(request: LoginRequest):
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     lang = request.language or detect_language(request.text)
-    
+
     # Ensure session exists in the conversations table
     session_id = await get_or_create_session(request.session_id, request.user_id, lang)
-    
+
     # Verify session exists in the database
     session_check = await db_fetch_one_async(
         "SELECT session_id FROM conversations WHERE session_id = $1",
-        (session_id,)
+        (session_id,),
     )
     if not session_check:
-        # If session doesn’t exist, explicitly insert it
         await db_execute_async(
             "INSERT INTO conversations (session_id, user_id, language, current_state) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-            (session_id, request.user_id, lang, json.dumps({}))
+            (session_id, request.user_id, lang, json.dumps({})),
         )
         logger.info(f"Created new session in conversations table: {session_id}")
-    
+
     # Fetch conversation history
     conversation_history = await get_conversation_history(session_id)
     history_dicts = [{"role": msg.role, "content": msg.content} for msg in conversation_history]
-    
+
     # Load or initialize state
     conv_state = await db_fetch_one_async(
         "SELECT current_state FROM conversations WHERE session_id = $1",
-        (session_id,)
+        (session_id,),
     )
     if conv_state and conv_state.get("current_state"):
         try:
             state_dict = json.loads(conv_state["current_state"])
+            # Ensure required fields are present, fall back to request data if missing
+            state_dict.setdefault("query", request.text)
+            state_dict.setdefault("language", lang)
+            state_dict.setdefault("session_id", session_id)
             state = CustomerState(**state_dict)
-            state.query = request.text
+            state.query = request.text  # Always update query with latest input
             state.conversation_history = history_dicts
-        except (json.JSONDecodeError, ValueError):
-            logger.error(f"Invalid state data for session {session_id}, resetting to new state")
-            state = CustomerState(query=request.text, user_id=request.user_id, language=lang, session_id=session_id, conversation_history=history_dicts)
+            state.mall_id = request.mall_id  # Use mall_id from request
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error(f"Invalid state data for session {session_id}, resetting to new state: {e}")
+            state = CustomerState(
+                query=request.text,
+                user_id=request.user_id,
+                language=lang,
+                session_id=session_id,
+                conversation_history=history_dicts,
+                mall_id=request.mall_id,
+            )
     else:
-        state = CustomerState(query=request.text, user_id=request.user_id, language=lang, session_id=session_id, conversation_history=history_dicts)
+        state = CustomerState(
+            query=request.text,
+            user_id=request.user_id,
+            language=lang,
+            session_id=session_id,
+            conversation_history=history_dicts,
+            mall_id=request.mall_id,
+        )
 
     # Process the request
-    with trace(name="CustomerChat", inputs={"query": request.text, "user_id": request.user_id}):
+    with trace(name="CustomerChat", inputs={"query": request.text, "user_id": request.user_id, "mall_id": request.mall_id}):
         result = await customer_graph.ainvoke(state)
-    
+
     # Update conversation history in the result
     result["conversation_history"] = history_dicts + [
         {"role": "user", "content": request.text},
-        {"role": "assistant", "content": result["response"]}
+        {"role": "assistant", "content": result["response"]},
     ]
-    
+
     # Save updated state
     state_json = json.dumps(result, cls=DateTimeEncoder)
     await db_execute_async(
         "UPDATE conversations SET current_state = $1 WHERE session_id = $2",
-        (state_json, session_id)
+        (state_json, session_id),
     )
-    
+
     # Add messages to conversation_messages table
     await add_message_to_conversation(session_id, "user", request.text)
     await add_message_to_conversation(session_id, "assistant", result["response"])
-    
+
     return ChatResponse(message=result["response"], session_id=session_id)
 
 @app.post("/tenant/update")
@@ -172,3 +190,8 @@ async def tenant_update(request: UpdateRequest):
 @app.get("/")
 async def root():
     return {"message": "Cenomi Chatbot with Gemini is up and running!"}
+
+@app.get("/malls")
+async def get_malls():
+    malls = db_fetch_all("SELECT mall_id, name_en FROM malls")
+    return [{"mall_id": str(mall["mall_id"]), "name_en": mall["name_en"]} for mall in malls]
