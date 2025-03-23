@@ -111,6 +111,8 @@ customer_prompt = PromptTemplate(
     - Connect offers to user's interests based on conversation history
     - For events, include dates, times, locations, and any registration requirements
     - Personalize recommendations based on previous interactions
+    - If a specific store is mentioned or implied (e.g., "they"), list its offers.
+    - If no offers exist for that store, say so gracefully and suggest offers from similar stores by category (e.g., fashion, electronics).
     
     ## Navigation Assistance
     - Provide clear, step-by-step directions within {mall_name}
@@ -265,7 +267,10 @@ async def refine_context(state: CustomerState) -> CustomerState:
     # Fetch offers explicitly for offer_info intent
     if state.intent == "offer_info":
         offers = await db_fetch_all_async(
-            "SELECT offer_id, description_en, store_id FROM offers WHERE mall_id = $1",
+            "SELECT o.offer_id, o.description_en, o.store_id "
+            "FROM offers o "
+            "JOIN stores s ON o.store_id = s.store_id "
+            "WHERE s.mall_id = $1",
             (state.mall_id,)
         )
         for offer in offers:
