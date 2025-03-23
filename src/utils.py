@@ -116,7 +116,7 @@ async def add_message_to_conversation(session_id: str, role: str, content: str):
         (session_id, role, content)
     )
 
-async def get_conversation_history(session_id: str, max_messages: int = 10) -> List[Message]:
+async def get_conversation_history(session_id: str, max_messages: int = 20) -> List[Message]:
     cache_key = f"history:{session_id}"
     cached_history = REDIS_CLIENT.get(cache_key)
     if cached_history:

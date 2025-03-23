@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
-from utils import detect_language, get_or_create_session, db_fetch_all_async, get_conversation_history, add_message_to_conversation, db_fetch_one_async, db_execute_async, DateTimeEncoder, logger, get_db_pool
+from utils import detect_language, get_or_create_session, db_fetch_all_async, get_conversation_history, add_message_to_conversation, db_fetch_one_async, db_execute_async, DateTimeEncoder, logger, get_db_pool, REDIS_CLIENT
 from customer import CustomerState, customer_graph
 from tenant import TenantState, tenant_graph
 from typing import Optional
@@ -88,7 +88,7 @@ async def chat(request: ChatRequest):
     if not session_check:
         await db_execute_async(
             "INSERT INTO conversations (session_id, user_id, language, current_state) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-            (session_id, request.user_id, lang, json.dumps({}))
+            (session_id, request.user_id, lang, json.dumps({})),
         )
         logger.info(f"Created new session in conversations table: {session_id}")
 
@@ -99,7 +99,7 @@ async def chat(request: ChatRequest):
     # Load or initialize state
     conv_state = await db_fetch_one_async(
         "SELECT current_state FROM conversations WHERE session_id = $1",
-        (session_id,)
+        (session_id,),
     )
     if conv_state and conv_state.get("current_state"):
         try:
@@ -119,7 +119,7 @@ async def chat(request: ChatRequest):
                 language=lang,
                 session_id=session_id,
                 conversation_history=history_dicts,
-                mall_id=request.mall_id
+                mall_id=request.mall_id,
             )
     else:
         state = CustomerState(
@@ -128,7 +128,7 @@ async def chat(request: ChatRequest):
             language=lang,
             session_id=session_id,
             conversation_history=history_dicts,
-            mall_id=request.mall_id
+            mall_id=request.mall_id,
         )
 
     # Process the request
@@ -145,12 +145,14 @@ async def chat(request: ChatRequest):
     state_json = json.dumps(result, cls=DateTimeEncoder)
     await db_execute_async(
         "UPDATE conversations SET current_state = $1 WHERE session_id = $2",
-        (state_json, session_id)
+        (state_json, session_id),
     )
 
     # Add messages to conversation_messages table
     await add_message_to_conversation(session_id, "user", request.text)
     await add_message_to_conversation(session_id, "assistant", result["response"])
+
+    await asyncio.to_thread(REDIS_CLIENT.delete, f"history:{session_id}")
 
     return ChatResponse(message=result["response"], session_id=session_id)
 
@@ -221,8 +223,9 @@ async def tenant_update(request: UpdateRequest):
     
     await add_message_to_conversation(session_id, "user", request.text)
     await add_message_to_conversation(session_id, "assistant", result["response"])
+
+    await asyncio.to_thread(REDIS_CLIENT.delete, f"history:{session_id}")
     
-    logger.info(f"Returning response: {result['response']}, session_id: {session_id}")
     return {"message": result["response"], "session_id": session_id}
 
 @app.get("/")
