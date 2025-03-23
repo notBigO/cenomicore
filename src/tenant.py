@@ -9,7 +9,7 @@ import json
 import os
 from pinecone import Pinecone
 from langchain_huggingface import HuggingFaceEmbeddings
-from utils import db_fetch_one, db_fetch_all, db_execute, convert_to_json_safe, REDIS_CLIENT, logger, get_conversation_history
+from utils import db_fetch_one_async, db_fetch_all_async, db_execute_async, REDIS_CLIENT, logger, get_conversation_history
 
 # Pinecone setup
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
@@ -83,10 +83,10 @@ tenant_prompt = PromptTemplate(
     """
 )
 
-def analyze_intent(state: TenantState) -> TenantState:
+async def analyze_intent(state: TenantState) -> TenantState:
     formatted_history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state.conversation_history[-4:]])
     intent_chain = intent_prompt | llm | StrOutputParser()
-    intent_result = intent_chain.invoke({"query": state.query, "conversation_history": formatted_history})
+    intent_result = await intent_chain.ainvoke({"query": state.query, "conversation_history": formatted_history})
     start = intent_result.find("```json") + 7
     end = intent_result.rfind("```")
     intent_data = json.loads(intent_result[start:end].strip())
@@ -100,8 +100,11 @@ def analyze_intent(state: TenantState) -> TenantState:
     state.action = intent_data.get("action")
     state.collected_data.update(intent_data.get("collected_data", {}))
     
-    tenant_id = state.user_id[2:] if state.user_id.startswith("t_") else state.user_id
-    user_stores = db_fetch_all("SELECT name_en FROM stores WHERE tenant_id = %s", (tenant_id,))
+    tenant_id = int(state.user_id[2:]) if state.user_id.startswith("t_") else int(state.user_id)  # Convert to int
+    user_stores = await db_fetch_all_async(
+        "SELECT name_en FROM stores WHERE tenant_id = $1",
+        (tenant_id,)  # Pass as int
+    )
     if "store" in state.collected_data:
         requested_store = state.collected_data["store"].lower()
         matching_store = next((s for s in user_stores if s["name_en"].lower() == requested_store), None)
@@ -119,9 +122,12 @@ def analyze_intent(state: TenantState) -> TenantState:
     
     return state
 
-def prompt_for_missing_info(state: TenantState) -> TenantState:
-    tenant_id = state.user_id[2:] if state.user_id.startswith("t_") else state.user_id
-    user_stores = db_fetch_all("SELECT name_en FROM stores WHERE tenant_id = %s", (tenant_id,))
+async def prompt_for_missing_info(state: TenantState) -> TenantState:
+    tenant_id = int(state.user_id[2:]) if state.user_id.startswith("t_") else int(state.user_id)  # Convert to int
+    user_stores = await db_fetch_all_async(
+        "SELECT name_en FROM stores WHERE tenant_id = $1",
+        (tenant_id,)  # Pass as int
+    )
     
     if state.current_step == "select_store" or (len(user_stores) > 1 and not state.store_name):
         if not user_stores:
@@ -148,12 +154,12 @@ def prompt_for_missing_info(state: TenantState) -> TenantState:
                 state.response = "When should it end? (e.g., '2025-04-30')"
                 state.current_step = "end_date"
             else:
-                execute_operation(state)
+                await execute_operation(state)
         elif state.action == "update":
             if "description" not in state.collected_data:
-                offers = db_fetch_all(
-                    "SELECT description_en, start_date, end_date FROM offers WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
-                    (state.store_name, tenant_id)
+                offers = await db_fetch_all_async(
+                    "SELECT description_en, start_date, end_date FROM offers WHERE store_id = (SELECT store_id FROM stores WHERE name_en = $1 AND tenant_id = $2)",
+                    (state.store_name, tenant_id)  # Pass tenant_id as int
                 )
                 if not offers:
                     state.response = f"No offers found for {state.store_name}. Want to add one?"
@@ -177,12 +183,12 @@ def prompt_for_missing_info(state: TenantState) -> TenantState:
                 state.response = f"What’s the new end date for '{state.collected_data['description']}'? (e.g., '2025-04-30')"
                 state.current_step = "new_end_date"
             else:
-                execute_operation(state)
+                await execute_operation(state)
         elif state.action == "delete":
             if "description" not in state.collected_data:
-                offers = db_fetch_all(
-                    "SELECT description_en, start_date, end_date FROM offers WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
-                    (state.store_name, tenant_id)
+                offers = await db_fetch_all_async(
+                    "SELECT description_en, start_date, end_date FROM offers WHERE store_id = (SELECT store_id FROM stores WHERE name_en = $1 AND tenant_id = $2)",
+                    (state.store_name, tenant_id)  # Pass tenant_id as int
                 )
                 if not offers:
                     state.response = f"No offers found for {state.store_name}. Want to add one?"
@@ -194,11 +200,11 @@ def prompt_for_missing_info(state: TenantState) -> TenantState:
                 state.response = f"Which offer to remove from {state.store_name}?\n{offer_list}\nType the number!"
                 state.current_step = "select_offer"
             else:
-                execute_operation(state)
+                await execute_operation(state)
         elif state.action == "list":
-            offers = db_fetch_all(
-                "SELECT description_en, start_date, end_date FROM offers WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
-                (state.store_name, tenant_id)
+            offers = await db_fetch_all_async(
+                "SELECT description_en, start_date, end_date FROM offers WHERE store_id = (SELECT store_id FROM stores WHERE name_en = $1 AND tenant_id = $2)",
+                (state.store_name, tenant_id)  # Pass tenant_id as int
             )
             if not offers:
                 state.response = f"No offers in {state.store_name} yet. Want to add one?"
@@ -221,12 +227,12 @@ def prompt_for_missing_info(state: TenantState) -> TenantState:
                 state.response = f"What’s the currency for '{state.collected_data['name']}'? (e.g., 'SAR')"
                 state.current_step = "currency"
             else:
-                execute_operation(state)
+                await execute_operation(state)
         elif state.action == "update":
             if "name" not in state.collected_data:
-                products = db_fetch_all(
-                    "SELECT name_en, description_en, price, currency FROM products WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
-                    (state.store_name, tenant_id)
+                products = await db_fetch_all_async(
+                    "SELECT name_en, description_en, price, currency FROM products WHERE store_id = (SELECT store_id FROM stores WHERE name_en = $1 AND tenant_id = $2)",
+                    (state.store_name, tenant_id)  # Pass tenant_id as int
                 )
                 if not products:
                     state.response = f"No products found for {state.store_name}. Want to add one?"
@@ -253,11 +259,11 @@ def prompt_for_missing_info(state: TenantState) -> TenantState:
                 state.response = f"What’s the new currency for '{state.collected_data['name']}'? (e.g., 'USD')"
                 state.current_step = "new_currency"
             else:
-                execute_operation(state)
+                await execute_operation(state)
         elif state.action == "delete":
             if "name" not in state.collected_data:
-                products = db_fetch_all(
-                    "SELECT name_en, description_en, price, currency FROM products WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
+                products = await db_fetch_all_async(
+                    "SELECT name_en, description_en, price, currency FROM products WHERE store_id = (SELECT store_id FROM stores WHERE name_en = $1 AND tenant_id = $2)",
                     (state.store_name, tenant_id)
                 )
                 if not products:
@@ -270,10 +276,10 @@ def prompt_for_missing_info(state: TenantState) -> TenantState:
                 state.response = f"Which product to remove from {state.store_name}?\n{product_list}\nType the number!"
                 state.current_step = "select_product"
             else:
-                execute_operation(state)
+                await execute_operation(state)
         elif state.action == "list":
-            products = db_fetch_all(
-                "SELECT name_en, description_en, price, currency FROM products WHERE store_id = (SELECT store_id FROM stores WHERE name_en = %s AND tenant_id = %s)",
+            products = await db_fetch_all_async(
+                "SELECT name_en, description_en, price, currency FROM products WHERE store_id = (SELECT store_id FROM stores WHERE name_en = $1 AND tenant_id = $2)",
                 (state.store_name, tenant_id)
             )
             if not products:
@@ -284,12 +290,15 @@ def prompt_for_missing_info(state: TenantState) -> TenantState:
     
     return state
 
-def process_input(state: TenantState) -> TenantState:
+async def process_input(state: TenantState) -> TenantState:
     if not state.current_step:
-        return analyze_intent(state)
+        return await analyze_intent(state)
     
-    tenant_id = state.user_id[2:] if state.user_id.startswith("t_") else state.user_id
-    user_stores = db_fetch_all("SELECT name_en FROM stores WHERE tenant_id = %s", (tenant_id,))
+    tenant_id = int(state.user_id[2:]) if state.user_id.startswith("t_") else int(state.user_id)  # Convert to int
+    user_stores = await db_fetch_all_async(
+        "SELECT name_en FROM stores WHERE tenant_id = $1",
+        (tenant_id,)  # Pass as int
+    )
     
     if state.current_step == "select_store":
         try:
@@ -366,13 +375,13 @@ def process_input(state: TenantState) -> TenantState:
         state.collected_data[state.current_step] = state.query.strip()
         state.current_step = None
     
-    return prompt_for_missing_info(state)
+    return await prompt_for_missing_info(state)
 
-def execute_operation(state: TenantState) -> None:
-    tenant_id = state.user_id[2:] if state.user_id.startswith("t_") else state.user_id
-    store = db_fetch_one(
-        "SELECT store_id, name_en, location_en FROM stores WHERE name_en = %s AND tenant_id = %s",
-        (state.store_name, tenant_id)
+async def execute_operation(state: TenantState) -> None:
+    tenant_id = int(state.user_id[2:]) if state.user_id.startswith("t_") else int(state.user_id)  # Convert to int
+    store = await db_fetch_one_async(
+        "SELECT store_id, name_en, location_en FROM stores WHERE name_en = $1 AND tenant_id = $2",
+        (state.store_name, tenant_id)  # Pass tenant_id as int
     )
     if not store:
         state.response = f"I couldn’t find {state.store_name} in your stores."
@@ -386,13 +395,20 @@ def execute_operation(state: TenantState) -> None:
     if state.entity_type == "offer":
         if state.action == "create":
             description = state.collected_data["description"]
-            start_date = state.collected_data["start_date"] if state.collected_data["start_date"] != "today" else datetime.now().strftime("%Y-%m-%d")
-            end_date = state.collected_data["end_date"]
-            db_execute(
-                "INSERT INTO offers (store_id, description_en, description_ar, start_date, end_date) VALUES (%s, %s, %s, %s, %s)",
-                (store_id, description, description, start_date, end_date)
+            # Convert start_date to datetime.date
+            start_date_str = state.collected_data["start_date"]
+            start_date = datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str != "today" else datetime.now().date()
+            # Convert end_date to datetime.date
+            end_date_str = state.collected_data["end_date"]
+            end_date = datetime.strptime(end_date_str, "%Y-%m-%d").date()
+            await db_execute_async(
+                "INSERT INTO offers (store_id, description_en, description_ar, start_date, end_date) VALUES ($1, $2, $3, $4, $5)",
+                (store_id, description, description, start_date, end_date)  # Pass datetime.date objects
             )
-            offer = db_fetch_one("SELECT offer_id FROM offers WHERE store_id = %s AND description_en = %s", (store_id, description))
+            offer = await db_fetch_one_async(
+                "SELECT offer_id FROM offers WHERE store_id = $1 AND description_en = $2",
+                (store_id, description)
+            )
             if offer:
                 offer_id = offer["offer_id"]
                 vector = embeddings.embed_query(description)
@@ -409,15 +425,16 @@ def execute_operation(state: TenantState) -> None:
                         "lang": "en"
                     }
                 }])
-                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
+                REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Added '{description}' to {state.store_name} from {start_date} to {end_date}. Anything else? 😊"
             else:
                 state.response = f"Failed to add '{description}'. Try again or contact support."
+                
         elif state.action == "update":
             old_desc = state.collected_data["description"]
             update_field = state.collected_data["update_field"]
-            offer = db_fetch_one(
-                "SELECT offer_id FROM offers WHERE store_id = %s AND description_en = %s",
+            offer = await db_fetch_one_async(
+                "SELECT offer_id FROM offers WHERE store_id = $1 AND description_en = $2",
                 (store_id, old_desc)
             )
             if not offer:
@@ -426,8 +443,8 @@ def execute_operation(state: TenantState) -> None:
             offer_id = offer["offer_id"]
             if update_field == "1":
                 new_desc = state.collected_data["new_description"]
-                db_execute(
-                    "UPDATE offers SET description_en = %s, description_ar = %s WHERE offer_id = %s",
+                await db_execute_async(
+                    "UPDATE offers SET description_en = $1, description_ar = $2 WHERE offer_id = $3",
                     (new_desc, new_desc, offer_id)
                 )
                 vector = embeddings.embed_query(new_desc)
@@ -444,35 +461,35 @@ def execute_operation(state: TenantState) -> None:
                         "lang": "en"
                     }
                 }])
-                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
+                REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Updated '{old_desc}' to '{new_desc}' in {state.store_name}. Anything else? 😊"
             elif update_field == "2":
                 new_start_date = state.collected_data["new_start_date"]
-                db_execute(
-                    "UPDATE offers SET start_date = %s WHERE offer_id = %s",
+                await db_execute_async(
+                    "UPDATE offers SET start_date = $1 WHERE offer_id = $2",
                     (new_start_date, offer_id)
                 )
-                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
+                REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Updated '{old_desc}' start date to {new_start_date} in {state.store_name}. Anything else? 😊"
             elif update_field == "3":
                 new_end_date = state.collected_data["new_end_date"]
-                db_execute(
-                    "UPDATE offers SET end_date = %s WHERE offer_id = %s",
+                await db_execute_async(
+                    "UPDATE offers SET end_date = $1 WHERE offer_id = $2",
                     (new_end_date, offer_id)
                 )
-                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
+                REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Updated '{old_desc}' end date to {new_end_date} in {state.store_name}. Anything else? 😊"
         elif state.action == "delete":
             description = state.collected_data["description"]
-            offer = db_fetch_one(
-                "SELECT offer_id FROM offers WHERE store_id = %s AND description_en = %s",
+            offer = await db_fetch_one_async(
+                "SELECT offer_id FROM offers WHERE store_id = $1 AND description_en = $2",
                 (store_id, description)
             )
             if offer:
                 offer_id = offer["offer_id"]
-                db_execute("DELETE FROM offers WHERE offer_id = %s", (offer_id,))
+                await db_execute_async("DELETE FROM offers WHERE offer_id = $1", (offer_id,))
                 index.delete(ids=[f"offer_{offer_id}_en"])
-                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
+                REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Removed '{description}' from {state.store_name}. Anything else? 😊"
             else:
                 state.response = f"Couldn’t find '{description}' in {state.store_name}. Want to list offers?"
@@ -483,11 +500,14 @@ def execute_operation(state: TenantState) -> None:
             description = state.collected_data.get("description")
             price = float(state.collected_data["price"])
             currency = state.collected_data["currency"]
-            db_execute(
-                "INSERT INTO products (store_id, name_en, name_ar, description_en, description_ar, price, currency) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            await db_execute_async(
+                "INSERT INTO products (store_id, name_en, name_ar, description_en, description_ar, price, currency) VALUES ($1, $2, $3, $4, $5, $6, $7)",
                 (store_id, name, name, description, description, price, currency)
             )
-            product = db_fetch_one("SELECT product_id FROM products WHERE store_id = %s AND name_en = %s", (store_id, name))
+            product = await db_fetch_one_async(
+                "SELECT product_id FROM products WHERE store_id = $1 AND name_en = $2",
+                (store_id, name)
+            )
             if product:
                 product_id = product["product_id"]
                 vector = embeddings.embed_query(f"{name} {description or ''}")
@@ -507,15 +527,15 @@ def execute_operation(state: TenantState) -> None:
                         "lang": "en"
                     }
                 }])
-                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
+                REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Added '{name}' ({description or 'No description'}) to {state.store_name} for {price} {currency}. Anything else? 😊"
             else:
                 state.response = f"Failed to add '{name}'. Try again or contact support."
         elif state.action == "update":
             old_name = state.collected_data["name"]
             update_field = state.collected_data["update_field"]
-            product = db_fetch_one(
-                "SELECT product_id FROM products WHERE store_id = %s AND name_en = %s",
+            product = await db_fetch_one_async(
+                "SELECT product_id FROM products WHERE store_id = $1 AND name_en = $2",
                 (store_id, old_name)
             )
             if not product:
@@ -524,8 +544,8 @@ def execute_operation(state: TenantState) -> None:
             product_id = product["product_id"]
             if update_field == "1":
                 new_name = state.collected_data["new_name"]
-                db_execute(
-                    "UPDATE products SET name_en = %s, name_ar = %s WHERE product_id = %s",
+                await db_execute_async(
+                    "UPDATE products SET name_en = $1, name_ar = $2 WHERE product_id = $3",
                     (new_name, new_name, product_id)
                 )
                 vector = embeddings.embed_query(f"{new_name} {state.collected_data.get('description', '')}")
@@ -545,12 +565,12 @@ def execute_operation(state: TenantState) -> None:
                         "lang": "en"
                     }
                 }])
-                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
+                REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Updated '{old_name}' to '{new_name}' in {state.store_name}. Anything else? 😊"
             elif update_field == "2":
                 new_desc = state.collected_data["new_description"]
-                db_execute(
-                    "UPDATE products SET description_en = %s, description_ar = %s WHERE product_id = %s",
+                await db_execute_async(
+                    "UPDATE products SET description_en = $1, description_ar = $2 WHERE product_id = $3",
                     (new_desc, new_desc, product_id)
                 )
                 vector = embeddings.embed_query(f"{old_name} {new_desc}")
@@ -570,12 +590,12 @@ def execute_operation(state: TenantState) -> None:
                         "lang": "en"
                     }
                 }])
-                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
+                REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Updated '{old_name}' description to '{new_desc}' in {state.store_name}. Anything else? 😊"
             elif update_field == "3":
                 new_price = float(state.collected_data["new_price"])
-                db_execute(
-                    "UPDATE products SET price = %s WHERE product_id = %s",
+                await db_execute_async(
+                    "UPDATE products SET price = $1 WHERE product_id = $2",
                     (new_price, product_id)
                 )
                 vector = embeddings.embed_query(f"{old_name} {state.collected_data.get('description', '')}")
@@ -595,12 +615,12 @@ def execute_operation(state: TenantState) -> None:
                         "lang": "en"
                     }
                 }])
-                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
+                REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Updated '{old_name}' price to {new_price} in {state.store_name}. Anything else? 😊"
             elif update_field == "4":
                 new_currency = state.collected_data["new_currency"]
-                db_execute(
-                    "UPDATE products SET currency = %s WHERE product_id = %s",
+                await db_execute_async(
+                    "UPDATE products SET currency = $1 WHERE product_id = $2",
                     (new_currency, product_id)
                 )
                 vector = embeddings.embed_query(f"{old_name} {state.collected_data.get('description', '')}")
@@ -620,19 +640,19 @@ def execute_operation(state: TenantState) -> None:
                         "lang": "en"
                     }
                 }])
-                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
+                REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Updated '{old_name}' currency to {new_currency} in {state.store_name}. Anything else? 😊"
         elif state.action == "delete":
             name = state.collected_data["name"]
-            product = db_fetch_one(
-                "SELECT product_id FROM products WHERE store_id = %s AND name_en = %s",
+            product = await db_fetch_one_async(
+                "SELECT product_id FROM products WHERE store_id = $1 AND name_en = $2",
                 (store_id, name)
             )
             if product:
                 product_id = product["product_id"]
-                db_execute("DELETE FROM products WHERE product_id = %s", (product_id,))
+                await db_execute_async("DELETE FROM products WHERE product_id = $1", (product_id,))
                 index.delete(ids=[f"product_{product_id}_en"])
-                REDIS_CLIENT.delete(f"context:*:{store_id}")  # Invalidate cache
+                REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Removed '{name}' from {state.store_name}. Anything else? 😊"
             else:
                 state.response = f"Couldn’t find '{name}' in {state.store_name}. Want to list products?"
@@ -643,20 +663,20 @@ def execute_operation(state: TenantState) -> None:
     state.current_step = None
     state.offer_list = None
 
-def tenant_recognize_intent(state: TenantState) -> TenantState:
-    conversation_history = get_conversation_history(state.session_id)  # Still sync for tenant compatibility
+async def tenant_recognize_intent(state: TenantState) -> TenantState:
+    conversation_history = await get_conversation_history(state.session_id)
     state.conversation_history = [{"role": msg.role, "content": msg.content} for msg in conversation_history]
     
     if not state.current_step:
-        state = analyze_intent(state)
-        state = prompt_for_missing_info(state)
+        state = await analyze_intent(state)
+        state = await prompt_for_missing_info(state)
     else:
-        state = process_input(state)
+        state = await process_input(state)
     
     if state.response:
         tenant_chain = tenant_prompt | llm | StrOutputParser()
         formatted_history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in state.conversation_history[-4:]])
-        state.response = tenant_chain.invoke({
+        state.response = await tenant_chain.ainvoke({
             "message": state.response,
             "conversation_history": formatted_history,
             "entity_type": state.entity_type or "unknown",

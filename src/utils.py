@@ -1,10 +1,9 @@
+import asyncio
 from datetime import datetime
 from decimal import Decimal
 import json
 import logging
 import os
-import psycopg2
-import uuid
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
 from langdetect import detect
@@ -12,6 +11,7 @@ from dotenv import load_dotenv
 import redis
 import asyncpg
 from asyncpg.pool import Pool
+import uuid
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -21,14 +21,6 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Database configuration
-DB_CONFIG = {
-    "dbname": os.getenv("DB_NAME", "cenomi_db"),
-    "user": os.getenv("DB_USER", "postgres"),
-    "password": os.getenv("DB_PASSWORD", "your_password"),
-    "host": os.getenv("DB_HOST", "localhost"),
-    "port": os.getenv("DB_PORT", "5432")
-}
-
 DB_CONFIG_ASYNC = {
     "database": os.getenv("DB_NAME", "cenomi_db"),
     "user": os.getenv("DB_USER", "postgres"),
@@ -65,53 +57,6 @@ class Message(BaseModel):
     def dict(self):
         return {"role": self.role, "content": self.content, "timestamp": self.timestamp}
 
-# Synchronous DB functions (for tenant compatibility)
-def db_fetch_one(query: str, params: tuple = ()):
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        cur = conn.cursor()
-        cur.execute(query, params)
-        row = cur.fetchone()
-        if not row:
-            return None
-        columns = [desc[0] for desc in cur.description]
-        return dict(zip(columns, row))
-    except Exception as e:
-        logger.error(f"Database error: {e}")
-        return None
-    finally:
-        if 'conn' in locals():
-            conn.close()
-
-def db_fetch_all(query: str, params: tuple = ()):
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        cur = conn.cursor()
-        cur.execute(query, params)
-        rows = cur.fetchall()
-        columns = [desc[0] for desc in cur.description]
-        return [dict(zip(columns, row)) for row in rows]
-    except Exception as e:
-        logger.error(f"Database error: {e}")
-        return []
-    finally:
-        if 'conn' in locals():
-            conn.close()
-
-def db_execute(query: str, params: tuple = ()):
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        cur = conn.cursor()
-        cur.execute(query, params)
-        conn.commit()
-        return True
-    except Exception as e:
-        logger.error(f"Database error: {e}")
-        return False
-    finally:
-        if 'conn' in locals():
-            conn.close()
-
 # Asynchronous DB functions
 async def db_fetch_one_async(query: str, params: tuple = ()):
     pool = await get_db_pool()
@@ -141,6 +86,7 @@ def convert_to_json_safe(data):
         return str(data)
     else:
         return data
+
 
 def detect_language(text: str) -> str:
     try:
