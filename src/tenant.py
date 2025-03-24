@@ -380,8 +380,8 @@ async def process_input(state: TenantState) -> TenantState:
 async def execute_operation(state: TenantState) -> None:
     tenant_id = int(state.user_id[2:]) if state.user_id.startswith("t_") else int(state.user_id)  # Convert to int
     store = await db_fetch_one_async(
-        "SELECT store_id, name_en, location_en FROM stores WHERE name_en = $1 AND tenant_id = $2",
-        (state.store_name, tenant_id)  # Pass tenant_id as int
+        "SELECT store_id, mall_id, name_en, location_en FROM stores WHERE name_en = $1 AND tenant_id = $2",
+        (state.store_name, tenant_id)
     )
     if not store:
         state.response = f"I couldn’t find {state.store_name} in your stores."
@@ -517,6 +517,7 @@ async def execute_operation(state: TenantState) -> None:
                     "metadata": {
                         "type": "product",
                         "id": product_id,
+                        "mall_id": store["mall_id"],
                         "name_en": name,
                         "description_en": description or "",
                         "price": price,
@@ -555,6 +556,7 @@ async def execute_operation(state: TenantState) -> None:
                     "metadata": {
                         "type": "product",
                         "id": product_id,
+                        "mall_id": store["mall_id"],
                         "name_en": new_name,
                         "description_en": state.collected_data.get("description", ""),
                         "price": float(state.collected_data.get("price", 0)),

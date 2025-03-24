@@ -133,13 +133,14 @@ def main():
 
     # 3. Products
     products_query = """
-        SELECT product_id AS id, store_id, name_en, name_ar, description_en, description_ar, price, currency 
-        FROM products
+        SELECT p.product_id AS id, p.store_id, s.mall_id, p.name_en, p.name_ar, p.description_en, p.description_ar, p.price, p.currency 
+        FROM products p
+        JOIN stores s ON p.store_id = s.store_id
     """
     products = fetch_data(products_query)
     upsert_embeddings(
         products, "product", "name_en", "name_ar",
-        ["id", "store_id", "name_en", "name_ar", "description_en", "description_ar", "price", "currency"]
+        ["id", "store_id", "mall_id", "name_en", "name_ar", "description_en", "description_ar", "price", "currency"]
     )
 
     # 4. Events
