@@ -55,8 +55,8 @@ intent_classification_prompt = PromptTemplate(
     template="""
     You are CenomiAI, a mall assistant. Parse this query to determine the user's intent based on the query and conversation history.
 
-    Valid entities: store, offer, product, event, service, amenity
-    Valid actions: info, navigate, recommend, list
+    Valid entities: store, offer, product, event, service, amenity, loyalty
+    Valid actions: info, navigate, recommend, list, balance, programs
 
     Query: "{query}"
 
@@ -67,16 +67,19 @@ intent_classification_prompt = PromptTemplate(
     - Use the conversation history to resolve vague terms like "it", "that", or "the store" to specific entities mentioned earlier.
     - If the query is a follow-up (e.g., "Where is it?"), link it to the most recent entity from history.
     - For broad queries (e.g., "What’s good here?"), assume 'recommend' or 'list' based on context.
+    - For loyalty-related queries, identify if the user is asking about their points balance or the programs they are enrolled in.
     - Extract specific details (e.g., store name) into collected_data.
 
     Return a JSON object with:
-    - entity_type: What they’re asking about (store, offer, product, etc.)
-    - action: What they want (info, navigate, recommend, list)
+    - entity_type: What they’re asking about (store, offer, product, etc., or loyalty)
+    - action: What they want (info, navigate, recommend, list, balance, programs)
     - collected_data: Any details provided (e.g., "name": "Tiffany & Co.")
 
-    Example output:
+    Example outputs:
     ```json
     {{"entity_type": "product", "action": "info", "collected_data": {{"name": "wedding ring"}}}}
+    {{"entity_type": "loyalty", "action": "balance", "collected_data": {{}}}}
+    {{"entity_type": "loyalty", "action": "programs", "collected_data": {{}}}}
     """
 )
 intent_chain = intent_classification_prompt | llm | StrOutputParser()
@@ -175,6 +178,7 @@ class CustomerState(PydanticBaseModel):
     initial_context: Optional[List[Dict[str, Any]]] = None
     suggestions: Optional[List[str]] = None
     mall_id: Optional[int] = None
+    direct_response: Optional[str] = None
 
 async def classify_intent(state: CustomerState) -> CustomerState:
     formatted_history = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in state.conversation_history[-6:]]) if state.conversation_history else "No prior conversation."
@@ -421,17 +425,97 @@ async def generate_response(state: CustomerState) -> CustomerState:
     state.response = response
     return state
 
+async def fetch_loyalty_data(state: CustomerState) -> CustomerState:
+     # Check if the user is logged in as a customer
+     if not state.user_id or not state.user_id.startswith("c_"):
+         state.response = "Please log in as a customer to access loyalty information."
+         return state
+ 
+     # Extract customer_id from user_id (e.g., "c_123" -> 123)
+     try:
+         customer_id = int(state.user_id[2:])
+     except ValueError:
+         state.response = "Invalid customer ID format."
+         return state
+ 
+     # Check if the customer_id exists in the customers table
+     customer_exists = await db_fetch_one_async(
+         "SELECT 1 FROM customers WHERE customer_id = $1",
+         (customer_id,)
+     )
+     if not customer_exists:
+         state.response = "Customer ID not found."
+         return state
+ 
+     # Fetch the customer's mall_id from the database
+     customer = await db_fetch_one_async(
+         "SELECT mall_id FROM customers WHERE customer_id = $1",
+         (customer_id,)
+     )
+     if not customer:
+         state.response = "Error fetching customer details." # Should ideally not happen if the previous check passed
+         return state
+     mall_id = customer["mall_id"]
+ 
+     # Handle "loyalty_balance" intent
+     if state.intent == "loyalty_balance":
+         balances = await db_fetch_all_async(
+             "SELECT lp.name_en, cl.points_balance "
+             "FROM customer_loyalty cl "
+             "JOIN loyalty_programs lp ON cl.loyalty_id = lp.loyalty_id "
+             "WHERE cl.customer_id = $1 AND lp.mall_id = $2",
+             (customer_id, mall_id)
+         )
+         if not balances:
+             state.response = "You are not enrolled in any loyalty programs yet."
+         else:
+             balance_str = "\n".join([f"- {b['name_en']}: {b['points_balance']} points" for b in balances])
+             state.response = f"Your loyalty points balances are:\n{balance_str}"
+ 
+     # Handle "loyalty_programs" intent
+     elif state.intent == "loyalty_programs":
+         programs = await db_fetch_all_async(
+             "SELECT lp.name_en, lp.description_en "
+             "FROM customer_loyalty cl "
+             "JOIN loyalty_programs lp ON cl.loyalty_id = lp.loyalty_id "
+             "WHERE cl.customer_id = $1 AND lp.mall_id = $2",
+             (customer_id, mall_id)
+         )
+         if not programs:
+             state.response = "You are not enrolled in any loyalty programs yet."
+         else:
+             program_str = "\n".join([f"- {p['name_en']}: {p['description_en']}" for p in programs])
+             state.response = f"You are enrolled in the following loyalty programs:\n{program_str}"
+ 
+     return state
+
 # Workflow
 customer_workflow = StateGraph(CustomerState)
 customer_workflow.add_node("classify_intent", classify_intent)
 customer_workflow.add_node("initial_retrieval", initial_retrieval)
 customer_workflow.add_node("refine_context", refine_context)
 customer_workflow.add_node("respond", generate_response)
+customer_workflow.add_node("fetch_loyalty_data", fetch_loyalty_data)
 customer_workflow.set_entry_point("classify_intent")
+
+def route_after_classify(state: CustomerState):
+    if state.intent in ["loyalty_balance", "loyalty_programs"]:
+        return "fetch_loyalty_data"
+    elif state.intent.startswith("other_") and state.response:
+        return "respond"
+    else:
+        return "initial_retrieval"
+    
 customer_workflow.add_conditional_edges(
     "classify_intent",
-    lambda state: "respond" if state.intent.startswith("other_") and state.response else "initial_retrieval",
+    route_after_classify,
+    {
+        "fetch_loyalty_data": "fetch_loyalty_data",
+        "respond": "respond",
+        "initial_retrieval": "initial_retrieval",
+    }
 )
+customer_workflow.add_edge("fetch_loyalty_data", END)
 customer_workflow.add_edge("initial_retrieval", "refine_context")
 customer_workflow.add_edge("refine_context", "respond")
 customer_workflow.add_edge("respond", END)

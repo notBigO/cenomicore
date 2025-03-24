@@ -109,6 +109,7 @@ async def chat(request: ChatRequest):
             state_dict.setdefault("session_id", session_id)
             state = CustomerState(**state_dict)
             state.query = request.text
+            state.user_id = request.user_id
             state.conversation_history = history_dicts
             state.mall_id = request.mall_id
         except (json.JSONDecodeError, ValueError) as e:
