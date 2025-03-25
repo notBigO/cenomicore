@@ -371,6 +371,7 @@ async def refine_context(state: CustomerState) -> CustomerState:
                 "store_id": metadata.get("store_id"),
                 "store_name": metadata.get("store_name"),
                 "location_en": metadata.get("location_en"),
+                "price": metadata.get("price")
             }
             context["products"].append(product)
             if metadata.get("store_id"):
