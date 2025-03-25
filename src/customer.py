@@ -312,7 +312,7 @@ async def refine_context(state: CustomerState) -> CustomerState:
     # Fetch offers explicitly for offer_info intent
     if state.intent.startswith("offer_"):
         offers = await db_fetch_all_async(
-            "SELECT o.offer_id, o.description_en, o.store_id "
+            "SELECT o.offer_id, o.description_en, o.store_id, o.start_date, o.end_date "
             "FROM offers o "
             "JOIN stores s ON o.store_id = s.store_id "
             "WHERE s.mall_id = $1",
@@ -329,6 +329,8 @@ async def refine_context(state: CustomerState) -> CustomerState:
                 "store_id": offer["store_id"],
                 "store_name": store["name_en"] if store else "Unknown Store",
                 "location_en": store["location_en"] if store else "Unknown Location",
+                "start_date": offer["start_date"].isoformat() if offer["start_date"] else None,
+                "end_date": offer["end_date"].isoformat() if offer["end_date"] else None,
             })
 
     # Process Pinecone results
@@ -355,6 +357,8 @@ async def refine_context(state: CustomerState) -> CustomerState:
                 "store_id": metadata.get("store_id"),
                 "store_name": metadata.get("store_name"),
                 "location_en": metadata.get("location_en"),
+                "start_date": metadata.get("start_date"),
+                "end_date": metadata.get("end_date")
             }
             context["offers"].append(offer)
             if metadata.get("store_id"):
