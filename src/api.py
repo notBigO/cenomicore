@@ -134,16 +134,16 @@ async def get_history(conversation_id: str, max_messages: int = 20) -> List[Dict
         (conversation_id, max_messages)
     )
     
-    # Format the messages
+    # Format the messages - convert timestamp to string
     history = [
-        {"role": msg["role"], "content": msg["content"], "timestamp": msg["timestamp"]}
+        {"role": msg["role"], "content": msg["content"]}  # Remove timestamp
         for msg in messages
     ]
     
-    # Cache the result
+    # Cache the result without timestamps
     REDIS_CLIENT.set(
         cache_key, 
-        json.dumps(history, cls=DateTimeEncoder), 
+        json.dumps(history), 
         ex=300
     )
     
@@ -189,11 +189,25 @@ async def chat(request: ChatRequest):
     # Create CustomerState
     try:
         if state_data:
+            # Remove duplicated parameters from state_data to avoid multiple values
+            if 'query' in state_data:
+                del state_data['query']
+            if 'user_id' in state_data:
+                del state_data['user_id']
+            if 'language' in state_data:
+                del state_data['language']
+            if 'conversation_id' in state_data:
+                del state_data['conversation_id']
+            if 'conversation_history' in state_data:
+                del state_data['conversation_history']
+            if 'mall_id' in state_data:
+                del state_data['mall_id']
+            
             state = CustomerState(
                 query=request.text,
                 user_id=request.user_id,
                 language=language,
-                conversation_id=conversation_id,  # Use consistent naming
+                conversation_id=conversation_id,
                 conversation_history=history,
                 mall_id=request.mall_id,
                 **state_data
@@ -203,7 +217,7 @@ async def chat(request: ChatRequest):
                 query=request.text,
                 user_id=request.user_id,
                 language=language,
-                conversation_id=conversation_id,  # Use consistent naming
+                conversation_id=conversation_id,
                 conversation_history=history,
                 mall_id=request.mall_id
             )
