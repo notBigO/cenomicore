@@ -27,7 +27,7 @@ class TenantState(BaseModel):
     query: str
     user_id: str
     language: str = "en"
-    session_id: str
+    conversation_id: str
     conversation_history: List[Dict[str, str]] = []
     entity_type: Optional[str] = None
     action: Optional[str] = None
@@ -57,7 +57,7 @@ intent_prompt = PromptTemplate(
     - Extract any specific details (e.g., name, description, store name) into collected_data.
 
     Return a JSON object with:
-    - entity_type: What they’re working with (store, offer, product)
+    - entity_type: What they're working with (store, offer, product)
     - action: What they want to do (create, update, delete, list)
     - collected_data: Any details provided (e.g., "name": "Blue Shirt", "description": "20% off", "store": "Zara")
 
@@ -111,7 +111,7 @@ async def analyze_intent(state: TenantState) -> TenantState:
         if matching_store:
             state.store_name = matching_store["name_en"]
         else:
-            state.response = f"I couldn’t find '{requested_store}'. Your stores: {', '.join([s['name_en'] for s in user_stores])}"
+            state.response = f"I couldn't find '{requested_store}'. Your stores: {', '.join([s['name_en'] for s in user_stores])}"
             state.current_step = "select_store"
             return state
     elif len(user_stores) == 1:
@@ -131,10 +131,10 @@ async def prompt_for_missing_info(state: TenantState) -> TenantState:
     
     if state.current_step == "select_store" or (len(user_stores) > 1 and not state.store_name):
         if not user_stores:
-            state.response = "You don’t have any stores yet. Contact mall management to get started!"
+            state.response = "You don't have any stores yet. Contact mall management to get started!"
             return state
         store_list = "\n".join([f"{i+1}) {s['name_en']}" for i, s in enumerate(user_stores)])
-        state.response = f"You’ve got multiple stores! Which one?\n{store_list}\nType the number!"
+        state.response = f"You've got multiple stores! Which one?\n{store_list}\nType the number!"
         state.current_step = "select_store"
         return state
     
@@ -145,7 +145,7 @@ async def prompt_for_missing_info(state: TenantState) -> TenantState:
     if state.entity_type == "offer":
         if state.action == "create":
             if "description" not in state.collected_data:
-                state.response = f"What’s the offer for {state.store_name}? (e.g., '20% off summer clothes')"
+                state.response = f"What's the offer for {state.store_name}? (e.g., '20% off summer clothes')"
                 state.current_step = "description"
             elif "start_date" not in state.collected_data:
                 state.response = "When should it start? (e.g., 'today' or '2025-04-01')"
@@ -174,13 +174,13 @@ async def prompt_for_missing_info(state: TenantState) -> TenantState:
                 state.response = f"What do you want to change for '{state.collected_data['description']}'?\n1) Description\n2) Start Date\n3) End Date\nType the number!"
                 state.current_step = "update_field"
             elif state.collected_data["update_field"] == "1" and "new_description" not in state.collected_data:
-                state.response = f"What’s the new description for '{state.collected_data['description']}'?"
+                state.response = f"What's the new description for '{state.collected_data['description']}'?"
                 state.current_step = "new_description"
             elif state.collected_data["update_field"] == "2" and "new_start_date" not in state.collected_data:
-                state.response = f"What’s the new start date for '{state.collected_data['description']}'? (e.g., '2025-04-01')"
+                state.response = f"What's the new start date for '{state.collected_data['description']}'? (e.g., '2025-04-01')"
                 state.current_step = "new_start_date"
             elif state.collected_data["update_field"] == "3" and "new_end_date" not in state.collected_data:
-                state.response = f"What’s the new end date for '{state.collected_data['description']}'? (e.g., '2025-04-30')"
+                state.response = f"What's the new end date for '{state.collected_data['description']}'? (e.g., '2025-04-30')"
                 state.current_step = "new_end_date"
             else:
                 await execute_operation(state)
@@ -215,16 +215,16 @@ async def prompt_for_missing_info(state: TenantState) -> TenantState:
     elif state.entity_type == "product":
         if state.action == "create":
             if "name" not in state.collected_data:
-                state.response = f"What’s the product name for {state.store_name}? (e.g., 'Blue Shirt')"
+                state.response = f"What's the product name for {state.store_name}? (e.g., 'Blue Shirt')"
                 state.current_step = "name"
             elif "description" not in state.collected_data:
-                state.response = f"What’s the description for '{state.collected_data['name']}'? (e.g., 'Cotton, size M')"
+                state.response = f"What's the description for '{state.collected_data['name']}'? (e.g., 'Cotton, size M')"
                 state.current_step = "description"
             elif "price" not in state.collected_data:
                 state.response = f"How much does '{state.collected_data['name']}' cost? (e.g., '50')"
                 state.current_step = "price"
             elif "currency" not in state.collected_data:
-                state.response = f"What’s the currency for '{state.collected_data['name']}'? (e.g., 'SAR')"
+                state.response = f"What's the currency for '{state.collected_data['name']}'? (e.g., 'SAR')"
                 state.current_step = "currency"
             else:
                 await execute_operation(state)
@@ -247,16 +247,16 @@ async def prompt_for_missing_info(state: TenantState) -> TenantState:
                 state.response = f"What do you want to change for '{state.collected_data['name']}'?\n1) Name\n2) Description\n3) Price\n4) Currency\nType the number!"
                 state.current_step = "update_field"
             elif state.collected_data["update_field"] == "1" and "new_name" not in state.collected_data:
-                state.response = f"What’s the new name for '{state.collected_data['name']}'?"
+                state.response = f"What's the new name for '{state.collected_data['name']}'?"
                 state.current_step = "new_name"
             elif state.collected_data["update_field"] == "2" and "new_description" not in state.collected_data:
-                state.response = f"What’s the new description for '{state.collected_data['name']}'?"
+                state.response = f"What's the new description for '{state.collected_data['name']}'?"
                 state.current_step = "new_description"
             elif state.collected_data["update_field"] == "3" and "new_price" not in state.collected_data:
-                state.response = f"What’s the new price for '{state.collected_data['name']}'? (e.g., '60')"
+                state.response = f"What's the new price for '{state.collected_data['name']}'? (e.g., '60')"
                 state.current_step = "new_price"
             elif state.collected_data["update_field"] == "4" and "new_currency" not in state.collected_data:
-                state.response = f"What’s the new currency for '{state.collected_data['name']}'? (e.g., 'USD')"
+                state.response = f"What's the new currency for '{state.collected_data['name']}'? (e.g., 'USD')"
                 state.current_step = "new_currency"
             else:
                 await execute_operation(state)
@@ -384,7 +384,7 @@ async def execute_operation(state: TenantState) -> None:
         (state.store_name, tenant_id)
     )
     if not store:
-        state.response = f"I couldn’t find {state.store_name} in your stores."
+        state.response = f"I couldn't find {state.store_name} in your stores."
         return
     
     store_id = store["store_id"]
@@ -438,7 +438,7 @@ async def execute_operation(state: TenantState) -> None:
                 (store_id, old_desc)
             )
             if not offer:
-                state.response = f"Couldn’t find '{old_desc}' in {state.store_name}. Want to list offers?"
+                state.response = f"Couldn't find '{old_desc}' in {state.store_name}. Want to list offers?"
                 return
             offer_id = offer["offer_id"]
             if update_field == "1":
@@ -492,7 +492,7 @@ async def execute_operation(state: TenantState) -> None:
                 REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Removed '{description}' from {state.store_name}. Anything else? 😊"
             else:
-                state.response = f"Couldn’t find '{description}' in {state.store_name}. Want to list offers?"
+                state.response = f"Couldn't find '{description}' in {state.store_name}. Want to list offers?"
     
     elif state.entity_type == "product":
         if state.action == "create":
@@ -540,7 +540,7 @@ async def execute_operation(state: TenantState) -> None:
                 (store_id, old_name)
             )
             if not product:
-                state.response = f"Couldn’t find '{old_name}' in {state.store_name}. Want to list products?"
+                state.response = f"Couldn't find '{old_name}' in {state.store_name}. Want to list products?"
                 return
             product_id = product["product_id"]
             if update_field == "1":
@@ -657,7 +657,7 @@ async def execute_operation(state: TenantState) -> None:
                 REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Removed '{name}' from {state.store_name}. Anything else? 😊"
             else:
-                state.response = f"Couldn’t find '{name}' in {state.store_name}. Want to list products?"
+                state.response = f"Couldn't find '{name}' in {state.store_name}. Want to list products?"
     
     state.entity_type = None
     state.action = None
@@ -666,7 +666,7 @@ async def execute_operation(state: TenantState) -> None:
     state.offer_list = None
 
 async def tenant_recognize_intent(state: TenantState) -> TenantState:
-    conversation_history = await get_conversation_history(state.session_id)
+    conversation_history = await get_conversation_history(state.conversation_id)
     state.conversation_history = [{"role": msg.role, "content": msg.content} for msg in conversation_history]
     
     if not state.current_step:
@@ -685,7 +685,7 @@ async def tenant_recognize_intent(state: TenantState) -> TenantState:
             "action": state.action or "unknown"
         })
     else:
-        state.response = "I’m not sure what you want to do. You can add, update, or remove offers or products—just let me know!"
+        state.response = "I'm not sure what you want to do. You can add, update, or remove offers or products—just let me know!"
     return state
 
 tenant_workflow = StateGraph(TenantState)

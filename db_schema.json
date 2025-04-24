@@ -1,0 +1,764 @@
+[{
+  "table_name": "brand_mall_association",
+  "column_name": "brand_id",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "NO"
+}, {
+  "table_name": "brand_mall_association",
+  "column_name": "unique_property_id",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "NO"
+}, {
+  "table_name": "brands",
+  "column_name": "id",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": "nextval('brands_id_seq'::regclass)",
+  "is_nullable": "NO"
+}, {
+  "table_name": "brands",
+  "column_name": "brand_id",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "NO"
+}, {
+  "table_name": "brands",
+  "column_name": "anchor_brand",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "tenant_profile_id",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "brand_name_en",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "brand_name_ar",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "brand_logo",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "company_name_en",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "company_name_ar",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "category_name",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "category_name_ar",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "group_name",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "group_name_ar",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "brand_profile_id",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "store_phone_code",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "store_phone_number",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "store_email",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "store_website",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "publish_date",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "is_published",
+  "data_type": "boolean",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "social_tiktok",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "social_instagram",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "social_facebook",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "social_threads",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "social_twitter",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "social_snapchat",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "social_youtube",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "description_en",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "description_ar",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "banner_en",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "banner_ar",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "images_en",
+  "data_type": "jsonb",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "images_ar",
+  "data_type": "jsonb",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "tags_en",
+  "data_type": "jsonb",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "tags_ar",
+  "data_type": "jsonb",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "pms_unit_codes",
+  "data_type": "jsonb",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "created_at",
+  "data_type": "timestamp without time zone",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "brands",
+  "column_name": "updated_at",
+  "data_type": "timestamp without time zone",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "conversation_messages",
+  "column_name": "id",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "NO"
+}, {
+  "table_name": "conversation_messages",
+  "column_name": "conversation_id",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "NO"
+}, {
+  "table_name": "conversation_messages",
+  "column_name": "role",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "NO"
+}, {
+  "table_name": "conversation_messages",
+  "column_name": "content",
+  "data_type": "text",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "NO"
+}, {
+  "table_name": "conversation_messages",
+  "column_name": "created_at",
+  "data_type": "timestamp without time zone",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "conversation_messages",
+  "column_name": "message_index",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "NO"
+}, {
+  "table_name": "conversations",
+  "column_name": "id",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "NO"
+}, {
+  "table_name": "conversations",
+  "column_name": "user_id",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "conversations",
+  "column_name": "created_at",
+  "data_type": "timestamp without time zone",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "conversations",
+  "column_name": "updated_at",
+  "data_type": "timestamp without time zone",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "conversations",
+  "column_name": "meta_data",
+  "data_type": "text",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "id",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": "nextval('engagements_id_seq'::regclass)",
+  "is_nullable": "NO"
+}, {
+  "table_name": "engagements",
+  "column_name": "engagement_id",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "NO"
+}, {
+  "table_name": "engagements",
+  "column_name": "brand_id",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "unique_property_id",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "tenant_profile_id",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "title_en",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "title_ar",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "type",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "description_en",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "description_ar",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "terms_conditions_en",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "terms_conditions_ar",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "start_date",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "end_date",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "publish_date",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "is_exclusive",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "images_en",
+  "data_type": "jsonb",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "images_ar",
+  "data_type": "jsonb",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "tags_en",
+  "data_type": "jsonb",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "tags_ar",
+  "data_type": "jsonb",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "ext_url",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "home_banner_disp",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "created_at",
+  "data_type": "timestamp without time zone",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "engagements",
+  "column_name": "updated_at",
+  "data_type": "timestamp without time zone",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "malls",
+  "column_name": "id",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": "nextval('malls_id_seq'::regclass)",
+  "is_nullable": "NO"
+}, {
+  "table_name": "malls",
+  "column_name": "unique_property_id",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "NO"
+}, {
+  "table_name": "malls",
+  "column_name": "property_group_id",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "malls",
+  "column_name": "marketing_name",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "malls",
+  "column_name": "marketing_name_ar",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "malls",
+  "column_name": "city",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "malls",
+  "column_name": "country",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "malls",
+  "column_name": "mall_information",
+  "data_type": "jsonb",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "malls",
+  "column_name": "image",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "malls",
+  "column_name": "gps_coordinates",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "malls",
+  "column_name": "created_at",
+  "data_type": "timestamp without time zone",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "malls",
+  "column_name": "updated_at",
+  "data_type": "timestamp without time zone",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "products",
+  "column_name": "id",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": "nextval('products_id_seq'::regclass)",
+  "is_nullable": "NO"
+}, {
+  "table_name": "products",
+  "column_name": "name",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "NO"
+}, {
+  "table_name": "products",
+  "column_name": "description",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "products",
+  "column_name": "price",
+  "data_type": "double precision",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "NO"
+}, {
+  "table_name": "products",
+  "column_name": "image_url",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "products",
+  "column_name": "category",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "products",
+  "column_name": "brand_id",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "NO"
+}, {
+  "table_name": "products",
+  "column_name": "is_featured",
+  "data_type": "boolean",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "products",
+  "column_name": "in_stock",
+  "data_type": "boolean",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "products",
+  "column_name": "created_at",
+  "data_type": "timestamp without time zone",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "products",
+  "column_name": "updated_at",
+  "data_type": "timestamp without time zone",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "services",
+  "column_name": "id",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": "nextval('services_id_seq'::regclass)",
+  "is_nullable": "NO"
+}, {
+  "table_name": "services",
+  "column_name": "name",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "NO"
+}, {
+  "table_name": "services",
+  "column_name": "name_ar",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "services",
+  "column_name": "description",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "services",
+  "column_name": "description_ar",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "services",
+  "column_name": "icon_url",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "services",
+  "column_name": "is_available",
+  "data_type": "boolean",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "services",
+  "column_name": "location",
+  "data_type": "character varying",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "services",
+  "column_name": "unique_property_id",
+  "data_type": "integer",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "NO"
+}, {
+  "table_name": "services",
+  "column_name": "created_at",
+  "data_type": "timestamp without time zone",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "services",
+  "column_name": "updated_at",
+  "data_type": "timestamp without time zone",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}]

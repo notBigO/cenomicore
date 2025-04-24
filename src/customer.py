@@ -37,17 +37,25 @@ llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", api_key=GEMINI_API_KEY)
 knowledge_graph = nx.Graph()
 
 async def populate_knowledge_graph():
-    stores = await db_fetch_all_async("SELECT store_id, name_en, mall_id FROM stores")
-    products = await db_fetch_all_async("SELECT product_id, name_en, store_id FROM products")
-    offers = await db_fetch_all_async("SELECT offer_id, description_en, store_id FROM offers")
-    for store in stores:
-        knowledge_graph.add_node(f"store_{store['store_id']}", type="store", name=store["name_en"], mall_id=store["mall_id"])
+    brands = await db_fetch_all_async(
+        "SELECT b.brand_id, b.brand_name_en, bma.unique_property_id FROM brands b JOIN brand_mall_association bma ON b.brand_id = bma.brand_id"
+    )
+    products = await db_fetch_all_async("SELECT id, name, brand_id FROM products")
+    engagements = await db_fetch_all_async(
+        "SELECT engagement_id, description_en, brand_id FROM engagements WHERE type = 'offer'"
+    )
+    
+    for brand in brands:
+        knowledge_graph.add_node(f"brand_{brand['brand_id']}", type="store", name=brand["brand_name_en"], mall_id=brand["unique_property_id"])
+    
     for product in products:
-        knowledge_graph.add_node(f"product_{product['product_id']}", type="product", name=product["name_en"])
-        knowledge_graph.add_edge(f"store_{product['store_id']}", f"product_{product['product_id']}")
-    for offer in offers:
-        knowledge_graph.add_node(f"offer_{offer['offer_id']}", type="offer", description=offer["description_en"])
-        knowledge_graph.add_edge(f"store_{offer['store_id']}", f"offer_{offer['offer_id']}")
+        knowledge_graph.add_node(f"product_{product['id']}", type="product", name=product["name"])
+        knowledge_graph.add_edge(f"brand_{product['brand_id']}", f"product_{product['id']}")
+    
+    for engagement in engagements:
+        knowledge_graph.add_node(f"engagement_{engagement['engagement_id']}", type="offer", description=engagement["description_en"])
+        if engagement["brand_id"]:
+            knowledge_graph.add_edge(f"brand_{engagement['brand_id']}", f"engagement_{engagement['engagement_id']}")
 
 # Intent Classification Prompt
 intent_classification_prompt = PromptTemplate(
@@ -66,12 +74,12 @@ intent_classification_prompt = PromptTemplate(
     Instructions:
     - Use the conversation history to resolve vague terms like "it", "that", or "the store" to specific entities mentioned earlier.
     - If the query is a follow-up (e.g., "Where is it?"), link it to the most recent entity from history.
-    - For broad queries (e.g., "What’s good here?"), assume 'recommend' or 'list' based on context.
+    - For broad queries (e.g., "What's good here?"), assume 'recommend' or 'list' based on context.
     - For loyalty-related queries, identify if the user is asking about their points balance or the programs they are enrolled in.
     - Extract specific details (e.g., store name) into collected_data.
 
     Return a JSON object with:
-    - entity_type: What they’re asking about (store, offer, product, etc., or loyalty)
+    - entity_type: What they're asking about (store, offer, product, etc., or loyalty)
     - action: What they want (info, navigate, recommend, list, balance, programs)
     - collected_data: Any details provided (e.g., "name": "Tiffany & Co.")
 
@@ -170,7 +178,7 @@ class CustomerState(PydanticBaseModel):
     query: str
     user_id: Optional[str] = None
     language: str
-    session_id: str
+    conversation_id: str
     conversation_history: List[Dict[str, str]] = []
     response: Optional[str] = None
     context_data: Optional[Dict[str, Any]] = None
@@ -196,7 +204,7 @@ async def classify_intent(state: CustomerState) -> CustomerState:
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse intent_result as JSON: '{cleaned_result}', Error: {e}")
         state.intent = "other_info"
-        state.response = "I’m having trouble understanding that 😅. Could you clarify what you’re asking about?"
+        state.response = "I'm having trouble understanding that 😅. Could you clarify what you're asking about?"
         return state
 
     state.intent = f"{intent_json['entity_type']}_{intent_json['action']}"
@@ -204,13 +212,13 @@ async def classify_intent(state: CustomerState) -> CustomerState:
     if intent_json["collected_data"].get("name"):
         state.context_data["resolved_entity"] = intent_json["collected_data"]["name"]
     if state.intent.startswith("other_"):
-        state.response = "I’m not sure what you mean 😅. Could you tell me more?"
+        state.response = "I'm not sure what you mean 😅. Could you tell me more?"
     logger.info(f"Classified intent: {state.intent}, Resolved entity: {state.context_data.get('resolved_entity')}")
     return state
 
 async def initial_retrieval(state: CustomerState) -> CustomerState:
     if not state.mall_id:
-        state.response = "Oops! I need to know which mall you’re asking about. Please select a mall first! 😊"
+        state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
         return state
 
     cache_key = f"initial_context:{state.query}:{state.intent}:{state.user_id or 'anon'}:{state.mall_id}"
@@ -246,9 +254,12 @@ async def initial_retrieval(state: CustomerState) -> CustomerState:
 
     # Extract store name or category
     store_name, category = None, None
-    all_stores = await db_fetch_all_async("SELECT name_en, category_en FROM stores WHERE mall_id = $1", (state.mall_id,))
-    store_names = [s["name_en"].lower() for s in all_stores]
-    categories = set(s["category_en"].lower() for s in all_stores)
+    all_brands = await db_fetch_all_async(
+        "SELECT b.brand_name_en, b.category_name FROM brands b JOIN brand_mall_association bma ON b.brand_id = bma.brand_id WHERE bma.unique_property_id = $1", 
+        (state.mall_id,)
+    )
+    store_names = [s["brand_name_en"].lower() for s in all_brands if s["brand_name_en"]]
+    categories = set(s["category_name"].lower() for s in all_brands if s["category_name"])
     for item in query_items:
         doc = nlp(item.lower())
         for ent in doc.ents:
@@ -294,7 +305,7 @@ async def initial_retrieval(state: CustomerState) -> CustomerState:
 
 async def refine_context(state: CustomerState) -> CustomerState:
     if not state.mall_id:
-        state.response = "Oops! I need to know which mall you’re asking about. Please select a mall first! 😊"
+        state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
         return state
 
     context = {
@@ -306,105 +317,104 @@ async def refine_context(state: CustomerState) -> CustomerState:
         "amenities": [],
         "mall_name": "",
     }
-    mall = await db_fetch_one_async("SELECT name_en FROM malls WHERE mall_id = $1", (state.mall_id,))
+    mall = await db_fetch_one_async("SELECT marketing_name AS name_en FROM malls WHERE unique_property_id = $1", (state.mall_id,))
     context["mall_name"] = mall["name_en"] if mall else "Unknown Mall"
 
     # Fetch offers explicitly for offer_info intent
     if state.intent.startswith("offer_"):
-        offers = await db_fetch_all_async(
-            "SELECT o.offer_id, o.description_en, o.store_id, o.start_date, o.end_date "
-            "FROM offers o "
-            "JOIN stores s ON o.store_id = s.store_id "
-            "WHERE s.mall_id = $1",
+        engagements = await db_fetch_all_async(
+            "SELECT e.engagement_id, e.description_en, e.brand_id, e.start_date, e.end_date "
+            "FROM engagements e "
+            "WHERE e.unique_property_id = $1 AND e.type = 'offer'",
             (state.mall_id,)
         )
-        for offer in offers:
-            store = await db_fetch_one_async(
-                "SELECT name_en, location_en FROM stores WHERE store_id = $1 AND mall_id = $2",
-                (offer["store_id"], state.mall_id)
+        for engagement in engagements:
+            brand = await db_fetch_one_async(
+                "SELECT brand_name_en FROM brands WHERE brand_id = $1",
+                (engagement["brand_id"],)
             )
             context["offers"].append({
-                "id": offer["offer_id"],
-                "description": offer["description_en"],
-                "store_id": offer["store_id"],
-                "store_name": store["name_en"] if store else "Unknown Store",
-                "location_en": store["location_en"] if store else "Unknown Location",
-                "start_date": offer["start_date"].isoformat() if offer["start_date"] else None,
-                "end_date": offer["end_date"].isoformat() if offer["end_date"] else None,
+                "id": engagement["engagement_id"],
+                "description": engagement["description_en"],
+                "brand_id": engagement["brand_id"],
+                "store_name": brand["brand_name_en"] if brand else "Unknown Store",
+                "start_date": engagement["start_date"],
+                "end_date": engagement["end_date"],
             })
 
     # Process Pinecone results
-    store_ids = set()
+    brand_ids = set()
     for doc in state.initial_context or []:
         metadata = doc["metadata"]
         if metadata.get("mall_id") != state.mall_id:
             continue
+        
         doc_type = metadata.get("type")
         if doc_type == "store":
             store = {
                 "name": metadata.get("name_en"),
-                "location": metadata.get("location_en"),
                 "category": metadata.get("category_en"),
-                "store_id": metadata.get("id"),
+                "store_id": metadata.get("brand_id"),
+                "description": metadata.get("description_en"),
             }
             if store not in context["stores"]:
                 context["stores"].append(store)
-            store_ids.add(metadata.get("id"))
-        elif doc_type == "offer":
-            offer = {
-                "id": metadata.get("id"),
-                "description": metadata.get("description_en"),
-                "store_id": metadata.get("store_id"),
-                "store_name": metadata.get("store_name"),
-                "location_en": metadata.get("location_en"),
-                "start_date": metadata.get("start_date"),
-                "end_date": metadata.get("end_date")
-            }
-            context["offers"].append(offer)
-            if metadata.get("store_id"):
-                store_ids.add(metadata["store_id"])
+            if metadata.get("brand_id"):
+                brand_ids.add(metadata.get("brand_id"))
+                
+        elif doc_type == "engagement":
+            # Determine if this is an offer or event based on type
+            engagement_type = metadata.get("type", "").lower()
+            if engagement_type == "offer":
+                offer = {
+                    "id": metadata.get("engagement_id"),
+                    "description": metadata.get("description_en"),
+                    "brand_id": metadata.get("brand_id"),
+                    "store_name": "",  # Will be filled in later
+                    "start_date": metadata.get("start_date"),
+                    "end_date": metadata.get("end_date")
+                }
+                context["offers"].append(offer)
+                if metadata.get("brand_id"):
+                    brand_ids.add(metadata["brand_id"])
+            elif engagement_type == "event":
+                context["events"].append({
+                    "name": metadata.get("name_en"),
+                    "date": metadata.get("start_date"),
+                    "description": metadata.get("description_en"),
+                })
+                
         elif doc_type == "product":
             product = {
                 "id": metadata.get("id"),
-                "name": metadata.get("name_en"),
-                "description": metadata.get("description_en"),
-                "store_id": metadata.get("store_id"),
-                "store_name": metadata.get("store_name"),
-                "location_en": metadata.get("location_en"),
-                "price": metadata.get("price")
+                "name": metadata.get("name"),
+                "brand_id": metadata.get("brand_id"),
+                "category": metadata.get("category"),
+                "store_name": metadata.get("brand_name_en"),
             }
             context["products"].append(product)
-            if metadata.get("store_id"):
-                store_ids.add(metadata["store_id"])
-        elif doc_type == "event":
-            context["events"].append({
-                "name": metadata.get("name_en"),
-                "date": metadata.get("start_time"),
-                "location": metadata.get("location_en"),
-            })
+            if metadata.get("brand_id"):
+                brand_ids.add(metadata["brand_id"])
+                
         elif doc_type == "service":
             context["services"].append({
-                "name": metadata.get("name_en"),
-                "description": metadata.get("description_en"),
-            })
-        elif doc_type == "amenity":
-            context["amenities"].append({
-                "name": metadata.get("name_en"),
-                "location": metadata.get("location_en"),
+                "name": metadata.get("name"),
             })
 
-    # Fetch additional store details
-    if store_ids:
-        stores = await db_fetch_all_async(
-            "SELECT store_id, name_en, location_en, category_en FROM stores WHERE store_id = ANY($1) AND mall_id = $2",
-            (list(store_ids), state.mall_id)
+    # Fetch additional brand details
+    if brand_ids:
+        brands = await db_fetch_all_async(
+            "SELECT brand_id, brand_name_en, category_name FROM brands WHERE brand_id = ANY($1)",
+            (list(brand_ids),)
         )
-        store_map = {s["store_id"]: s for s in stores}
+        brand_map = {b["brand_id"]: b for b in brands}
+        
         for item in context["offers"] + context["products"]:
-            if item.get("store_id") in store_map and not item.get("store_name"):
-                store = store_map[item["store_id"]]
-                item["store_name"] = store["name_en"]
-                item["location_en"] = store["location_en"]
+            if item.get("brand_id") in brand_map and not item.get("store_name"):
+                brand = brand_map[item["brand_id"]]
+                item["store_name"] = brand["brand_name_en"]
+                if "category" not in item and brand["category_name"]:
+                    item["category"] = brand["category_name"]
 
     state.context_data = context
     state.response = json.dumps(convert_to_json_safe(context))
@@ -412,7 +422,7 @@ async def refine_context(state: CustomerState) -> CustomerState:
 
 async def generate_response(state: CustomerState) -> CustomerState:
     if not state.mall_id:
-        state.response = "Oops! I need to know which mall you’re asking about. Please select a mall first! 😊"
+        state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
         return state
 
     formatted_history = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in state.conversation_history[-6:]]) if state.conversation_history else "No prior conversation."
@@ -431,68 +441,9 @@ async def generate_response(state: CustomerState) -> CustomerState:
     return state
 
 async def fetch_loyalty_data(state: CustomerState) -> CustomerState:
-     # Check if the user is logged in as a customer
-     if not state.user_id or not state.user_id.startswith("c_"):
-         state.response = "Please log in as a customer to access loyalty information."
-         return state
- 
-     # Extract customer_id from user_id (e.g., "c_123" -> 123)
-     try:
-         customer_id = int(state.user_id[2:])
-     except ValueError:
-         state.response = "Invalid customer ID format."
-         return state
- 
-     # Check if the customer_id exists in the customers table
-     customer_exists = await db_fetch_one_async(
-         "SELECT 1 FROM customers WHERE customer_id = $1",
-         (customer_id,)
-     )
-     if not customer_exists:
-         state.response = "Customer ID not found."
-         return state
- 
-     # Fetch the customer's mall_id from the database
-     customer = await db_fetch_one_async(
-         "SELECT mall_id FROM customers WHERE customer_id = $1",
-         (customer_id,)
-     )
-     if not customer:
-         state.response = "Error fetching customer details." # Should ideally not happen if the previous check passed
-         return state
-     mall_id = customer["mall_id"]
- 
-     # Handle "loyalty_balance" intent
-     if state.intent == "loyalty_balance":
-         balances = await db_fetch_all_async(
-             "SELECT lp.name_en, cl.points_balance "
-             "FROM customer_loyalty cl "
-             "JOIN loyalty_programs lp ON cl.loyalty_id = lp.loyalty_id "
-             "WHERE cl.customer_id = $1 AND lp.mall_id = $2",
-             (customer_id, mall_id)
-         )
-         if not balances:
-             state.response = "You are not enrolled in any loyalty programs yet."
-         else:
-             balance_str = "\n".join([f"- {b['name_en']}: {b['points_balance']} points" for b in balances])
-             state.response = f"Your loyalty points balances are:\n{balance_str}"
- 
-     # Handle "loyalty_programs" intent
-     elif state.intent == "loyalty_programs":
-         programs = await db_fetch_all_async(
-             "SELECT lp.name_en, lp.description_en "
-             "FROM customer_loyalty cl "
-             "JOIN loyalty_programs lp ON cl.loyalty_id = lp.loyalty_id "
-             "WHERE cl.customer_id = $1 AND lp.mall_id = $2",
-             (customer_id, mall_id)
-         )
-         if not programs:
-             state.response = "You are not enrolled in any loyalty programs yet."
-         else:
-             program_str = "\n".join([f"- {p['name_en']}: {p['description_en']}" for p in programs])
-             state.response = f"You are enrolled in the following loyalty programs:\n{program_str}"
- 
-     return state
+    # Since loyalty tables don't exist in the schema, we'll return a message that it's not available
+    state.response = "I'm sorry, but the loyalty program features are not available at this time."
+    return state
 
 # Workflow
 customer_workflow = StateGraph(CustomerState)

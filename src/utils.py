@@ -94,38 +94,50 @@ def detect_language(text: str) -> str:
     except Exception:
         return "en"
 
-async def get_or_create_session(session_id: Optional[str], user_id: Optional[str], language: str) -> str:
-    if session_id:
+async def get_or_create_conversation(conversation_id: Optional[str], user_id: Optional[str], language: str) -> str:
+    if conversation_id:
         await db_execute_async(
-            "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE session_id = $1",
-            (session_id,)
+            "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+            (conversation_id,)
         )
-        return session_id
+        return conversation_id
     else:
-        new_session_id = str(uuid.uuid4())
+        new_conversation_id = str(uuid.uuid4())
         user_id_clean = user_id[2:] if user_id and user_id.startswith(("t_", "c_")) else user_id
+        # Store language and state in meta_data as JSON
+        meta_data = json.dumps({"language": language, "state": {}})
         await db_execute_async(
-            "INSERT INTO conversations (session_id, user_id, language, current_state) VALUES ($1, $2, $3, $4)",
-            (new_session_id, user_id_clean, language, json.dumps({}))
+            "INSERT INTO conversations (id, user_id, meta_data) VALUES ($1, $2, $3)",
+            (new_conversation_id, user_id_clean, meta_data)
         )
-        return new_session_id
+        return new_conversation_id
 
-async def add_message_to_conversation(session_id: str, role: str, content: str):
+async def add_message_to_conversation(conversation_id: str, role: str, content: str):
+    # Get the current max message_index
+    max_index = await db_fetch_one_async(
+        "SELECT COALESCE(MAX(message_index), -1) as max_idx FROM conversation_messages WHERE conversation_id = $1",
+        (conversation_id,)
+    )
+    next_index = (max_index["max_idx"] + 1) if max_index else 0
+    
+    # Generate a unique ID for the message
+    message_id = str(uuid.uuid4())
+    
     await db_execute_async(
-        "INSERT INTO conversation_messages (session_id, role, content) VALUES ($1, $2, $3)",
-        (session_id, role, content)
+        "INSERT INTO conversation_messages (id, conversation_id, role, content, message_index) VALUES ($1, $2, $3, $4, $5)",
+        (message_id, conversation_id, role, content, next_index)
     )
 
-async def get_conversation_history(session_id: str, max_messages: int = 20) -> List[Message]:
-    cache_key = f"history:{session_id}"
+async def get_conversation_history(conversation_id: str, max_messages: int = 20) -> List[Message]:
+    cache_key = f"history:{conversation_id}"
     cached_history = REDIS_CLIENT.get(cache_key)
     if cached_history:
         return [Message(**msg) for msg in json.loads(cached_history)]
     
     messages = await db_fetch_all_async(
-        "SELECT role, content, timestamp FROM conversation_messages "
-        "WHERE session_id = $1 ORDER BY timestamp DESC LIMIT $2",
-        (session_id, max_messages)
+        "SELECT role, content, created_at as timestamp FROM conversation_messages "
+        "WHERE conversation_id = $1 ORDER BY message_index DESC LIMIT $2",
+        (conversation_id, max_messages)
     )
     history = [
         Message(role=msg["role"], content=msg["content"], timestamp=msg["timestamp"])

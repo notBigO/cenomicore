@@ -5,17 +5,18 @@ from dotenv import load_dotenv
 import os
 from decimal import Decimal
 from datetime import date, time, datetime
+import json
 
 # Load environment variables
 load_dotenv()
 
 # Database configuration
 DB_CONFIG = {
-    "dbname": os.getenv("DB_NAME"),
-    "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD"),
-    "host": os.getenv("DB_HOST"),
-    "port": os.getenv("DB_PORT")
+    "dbname": os.getenv("DB_NAME", "cenomi_db"),
+    "user": os.getenv("DB_USER", "postgres"),
+    "password": os.getenv("DB_PASSWORD", "your_password"),
+    "host": os.getenv("DB_HOST", "localhost"),
+    "port": os.getenv("DB_PORT", "5432")
 }
 print(DB_CONFIG)
 
@@ -27,7 +28,8 @@ pc = Pinecone(api_key=PINECONE_API_KEY)
 
 # Check if index exists and create it if not
 INDEX_NAME = "cenomicore"
-if INDEX_NAME not in pc.list_indexes().names():
+existing_indexes = pc.list_indexes().names()
+if INDEX_NAME not in existing_indexes:
     pc.create_index(
         name=INDEX_NAME,
         dimension=384,
@@ -73,6 +75,13 @@ def convert_metadata(metadata):
             converted[key] = float(value)
         elif isinstance(value, (date, time, datetime)):
             converted[key] = value.isoformat()
+        elif isinstance(value, dict) or isinstance(value, list):
+            # Convert complex JSON objects (dicts and lists) to strings
+            try:
+                converted[key] = json.dumps(value)
+            except:
+                # If serialization fails, store as empty string
+                converted[key] = ""
         else:
             converted[key] = value
     return converted
@@ -107,101 +116,71 @@ def upsert_embeddings(data, id_prefix, text_field_en, text_field_ar, metadata_fi
         print(f"Error upserting {id_prefix} embeddings: {e}")
 
 def main():
-    # 1. Malls
+    # 1. Malls (previously unique_properties)
     malls_query = """
-        SELECT mall_id AS id, name_en, name_ar, location_en, location_ar, description_en, description_ar 
+        SELECT id, unique_property_id, marketing_name AS name_en, marketing_name_ar AS name_ar, 
+        city, country, mall_information
         FROM malls
     """
     malls = fetch_data(malls_query)
     upsert_embeddings(
         malls, "mall", "name_en", "name_ar",
-        ["id", "name_en", "name_ar", "location_en", "location_ar", "description_en", "description_ar"]
+        ["id", "unique_property_id", "name_en", "name_ar", "city", "country", "mall_information"]
     )
 
-    # 2. Stores
-    stores_query = """
-        SELECT store_id AS id, mall_id, tenant_id, name_en, name_ar, category_en, category_ar, 
-               location_en, location_ar, description_en, description_ar 
-        FROM stores
+    # 2. Brands (previously stores)
+    brands_query = """
+        SELECT b.id, b.brand_id, b.brand_name_en AS name_en, b.brand_name_ar AS name_ar, 
+        b.category_name AS category_en, b.category_name_ar AS category_ar,
+        b.description_en, b.description_ar, bma.unique_property_id AS mall_id
+        FROM brands b
+        JOIN brand_mall_association bma ON b.brand_id = bma.brand_id
     """
-    stores = fetch_data(stores_query)
+    brands = fetch_data(brands_query)
     upsert_embeddings(
-        stores, "store", "name_en", "name_ar",
-        ["id", "mall_id", "tenant_id", "name_en", "name_ar", "category_en", "category_ar", 
-         "location_en", "location_ar", "description_en", "description_ar"]
+        brands, "store", "name_en", "name_ar",
+        ["id", "brand_id", "name_en", "name_ar", "category_en", "category_ar", 
+         "description_en", "description_ar", "mall_id"]
     )
 
     # 3. Products
     products_query = """
-        SELECT p.product_id AS id, p.store_id, s.mall_id, p.name_en, p.name_ar, p.description_en, p.description_ar, p.price, p.currency 
+        SELECT p.id, p.name, p.category, p.brand_id, b.brand_name_en, bma.unique_property_id AS mall_id
         FROM products p
-        JOIN stores s ON p.store_id = s.store_id
+        JOIN brands b ON p.brand_id = b.brand_id
+        JOIN brand_mall_association bma ON b.brand_id = bma.brand_id
     """
     products = fetch_data(products_query)
+    # Since products table doesn't seem to have AR fields, we'll use the same field for both
     upsert_embeddings(
-        products, "product", "name_en", "name_ar",
-        ["id", "store_id", "mall_id", "name_en", "name_ar", "description_en", "description_ar", "price", "currency"]
+        products, "product", "name", "name",
+        ["id", "brand_id", "name", "category", "brand_name_en", "mall_id"]
     )
 
-    # 4. Events
-    events_query = """
-        SELECT event_id AS id, mall_id, name_en, name_ar, description_en, description_ar, 
-               start_time, end_time, location_en, location_ar 
-        FROM events
+    # 4. Engagements (previously offers/events)
+    engagements_query = """
+        SELECT e.id, e.engagement_id, e.brand_id, e.unique_property_id AS mall_id,
+        e.title_en AS name_en, e.title_ar AS name_ar, e.type,
+        e.description_en, e.description_ar, e.start_date, e.end_date
+        FROM engagements e
     """
-    events = fetch_data(events_query)
+    engagements = fetch_data(engagements_query)
     upsert_embeddings(
-        events, "event", "name_en", "name_ar",
-        ["id", "mall_id", "name_en", "name_ar", "description_en", "description_ar", 
-         "start_time", "end_time", "location_en", "location_ar"]
+        engagements, "engagement", "name_en", "name_ar",
+        ["id", "engagement_id", "brand_id", "mall_id", "name_en", "name_ar", "type",
+         "description_en", "description_ar", "start_date", "end_date"]
     )
 
-    # 5. Offers
-    offers_query = """
-        SELECT offer_id AS id, store_id, description_en, description_ar, start_date, end_date 
-        FROM offers
-    """
-    offers = fetch_data(offers_query)
-    upsert_embeddings(
-        offers, "offer", "description_en", "description_ar",
-        ["id", "store_id", "description_en", "description_ar", "start_date", "end_date"]
-    )
-
-    # 6. Services
+    # 5. Services
     services_query = """
-        SELECT service_id AS id, mall_id, name_en, name_ar, description_en, description_ar 
-        FROM services
+        SELECT s.id, s.name, s.unique_property_id AS mall_id
+        FROM services s
     """
     services = fetch_data(services_query)
+    # Since services table doesn't seem to have AR fields, we'll use the same field for both
     upsert_embeddings(
-        services, "service", "name_en", "name_ar",
-        ["id", "mall_id", "name_en", "name_ar", "description_en", "description_ar"]
-    )
-
-    # 7. Loyalty Programs
-    loyalty_query = """
-        SELECT loyalty_id AS id, mall_id, name_en, name_ar, description_en, description_ar, 
-               points_per_purchase, redemption_rules_en, redemption_rules_ar 
-        FROM loyalty_programs
-    """
-    loyalty_programs = fetch_data(loyalty_query)
-    upsert_embeddings(
-        loyalty_programs, "loyalty", "name_en", "name_ar",
-        ["id", "mall_id", "name_en", "name_ar", "description_en", "description_ar", 
-         "points_per_purchase", "redemption_rules_en", "redemption_rules_ar"]
-    )
-
-    # 8. Amenities
-    amenities_query = """
-        SELECT amenity_id AS id, mall_id, name_en, name_ar, location_en, location_ar, 
-               description_en, description_ar 
-        FROM amenities
-    """
-    amenities = fetch_data(amenities_query)
-    upsert_embeddings(
-        amenities, "amenity", "name_en", "name_ar",
-        ["id", "mall_id", "name_en", "name_ar", "location_en", "location_ar", 
-         "description_en", "description_ar"]
+        services, "service", "name", "name",
+        ["id", "name", "mall_id"]
     )
 
     print("All embeddings successfully uploaded to Pinecone!")

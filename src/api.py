@@ -3,14 +3,20 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
-from utils import detect_language, get_or_create_session, db_fetch_all_async, get_conversation_history, add_message_to_conversation, db_fetch_one_async, db_execute_async, DateTimeEncoder, logger, get_db_pool, REDIS_CLIENT
+from utils import (
+    detect_language, get_or_create_conversation, db_fetch_all_async, 
+    get_conversation_history, add_message_to_conversation, db_fetch_one_async, 
+    db_execute_async, DateTimeEncoder, logger, get_db_pool, REDIS_CLIENT,
+    Message  # Make sure to import Message class
+)
 from customer import CustomerState, customer_graph
 from tenant import TenantState, tenant_graph
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from langsmith import Client
 from langsmith import trace
 import os
 from customer import populate_knowledge_graph
+import uuid
 
 app = FastAPI()
 app.add_middleware(
@@ -34,22 +40,23 @@ os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGSMITH_API_KEY", "your_api_key_h
 os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGSMITH_PROJECT", "cenomi-bot")
 langsmith_client = Client()
 
+# Request and response models with consistent naming
 class ChatRequest(BaseModel):
     text: str
     user_id: Optional[str] = None
     language: Optional[str] = None
-    session_id: Optional[str] = None
+    conversation_id: Optional[str] = None  # Changed from session_id
     mall_id: Optional[int] = None
 
 class ChatResponse(BaseModel):
     message: str
-    session_id: str
+    conversation_id: str  # Changed from session_id
 
 class UpdateRequest(BaseModel):
     text: str
     user_id: str
     language: Optional[str] = None
-    session_id: Optional[str] = None
+    conversation_id: Optional[str] = None  # Changed from session_id
 
 class LoginRequest(BaseModel):
     email: str
@@ -73,89 +80,165 @@ async def login(request: LoginRequest):
     
     raise HTTPException(status_code=401, detail="Invalid credentials")
 
+# Create a new conversation record
+async def create_conversation(user_id: Optional[str], language: str) -> str:
+    conversation_id = str(uuid.uuid4())
+    user_id_clean = user_id[2:] if user_id and user_id.startswith(("t_", "c_")) else user_id
+    
+    # Store language in meta_data JSON
+    meta_data = json.dumps({"language": language, "state": {}})
+    
+    await db_execute_async(
+        "INSERT INTO conversations (id, user_id, meta_data, created_at, updated_at) "
+        "VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        (conversation_id, user_id_clean, meta_data)
+    )
+    
+    return conversation_id
+
+# Add a message to the conversation history
+async def add_message(conversation_id: str, role: str, content: str) -> None:
+    # Get the next message index
+    max_index = await db_fetch_one_async(
+        "SELECT COALESCE(MAX(message_index), -1) as max_idx FROM conversation_messages "
+        "WHERE conversation_id = $1",
+        (conversation_id,)
+    )
+    next_index = (max_index["max_idx"] + 1) if max_index and max_index.get("max_idx") is not None else 0
+    
+    # Create a unique message ID
+    message_id = str(uuid.uuid4())
+    
+    # Insert the message
+    await db_execute_async(
+        "INSERT INTO conversation_messages (id, conversation_id, role, content, message_index, created_at) "
+        "VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)",
+        (message_id, conversation_id, role, content, next_index)
+    )
+    
+    # Invalidate cache
+    await asyncio.to_thread(REDIS_CLIENT.delete, f"history:{conversation_id}")
+
+# Get conversation history
+async def get_history(conversation_id: str, max_messages: int = 20) -> List[Dict[str, Any]]:
+    # Check cache first
+    cache_key = f"history:{conversation_id}"
+    cached_history = REDIS_CLIENT.get(cache_key)
+    if cached_history:
+        return json.loads(cached_history)
+    
+    # Fetch from database
+    messages = await db_fetch_all_async(
+        "SELECT role, content, created_at as timestamp FROM conversation_messages "
+        "WHERE conversation_id = $1 ORDER BY message_index ASC LIMIT $2",
+        (conversation_id, max_messages)
+    )
+    
+    # Format the messages
+    history = [
+        {"role": msg["role"], "content": msg["content"], "timestamp": msg["timestamp"]}
+        for msg in messages
+    ]
+    
+    # Cache the result
+    REDIS_CLIENT.set(
+        cache_key, 
+        json.dumps(history, cls=DateTimeEncoder), 
+        ex=300
+    )
+    
+    return history
+
+# Main chat endpoint
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    lang = request.language or detect_language(request.text)
-
-    # Ensure session exists in the conversations table
-    session_id = await get_or_create_session(request.session_id, request.user_id, lang)
-
-    # Verify session exists in the database
-    session_check = await db_fetch_one_async(
-        "SELECT session_id FROM conversations WHERE session_id = $1",
-        (session_id,)
-    )
-    if not session_check:
+    # Set language based on request or detect from text
+    language = request.language or detect_language(request.text)
+    
+    # Get or create conversation
+    conversation_id = request.conversation_id
+    if not conversation_id:
+        # Create a new conversation
+        conversation_id = await create_conversation(request.user_id, language)
+    else:
+        # Update the last activity timestamp for existing conversation
         await db_execute_async(
-            "INSERT INTO conversations (session_id, user_id, language, current_state) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-            (session_id, request.user_id, lang, json.dumps({})),
+            "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+            (conversation_id,)
         )
-        logger.info(f"Created new session in conversations table: {session_id}")
-
-    # Fetch conversation history
-    conversation_history = await get_conversation_history(session_id)
-    history_dicts = [{"role": msg.role, "content": msg.content} for msg in conversation_history]
-
-    # Load or initialize state
-    conv_state = await db_fetch_one_async(
-        "SELECT current_state FROM conversations WHERE session_id = $1",
-        (session_id,),
+    
+    # Get conversation history
+    history = await get_history(conversation_id)
+    
+    # Load state from meta_data
+    conv_data = await db_fetch_one_async(
+        "SELECT meta_data FROM conversations WHERE id = $1",
+        (conversation_id,)
     )
-    if conv_state and conv_state.get("current_state"):
+    
+    # Initialize state
+    state_data = {}
+    if conv_data and conv_data.get("meta_data"):
         try:
-            state_dict = json.loads(conv_state["current_state"])
-            state_dict.setdefault("query", request.text)
-            state_dict.setdefault("language", lang)
-            state_dict.setdefault("session_id", session_id)
-            state = CustomerState(**state_dict)
-            state.query = request.text
-            state.user_id = request.user_id
-            state.conversation_history = history_dicts
-            state.mall_id = request.mall_id
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.error(f"Invalid state data for session {session_id}, resetting to new state: {e}")
+            meta_data = json.loads(conv_data["meta_data"])
+            if "state" in meta_data:
+                state_data = meta_data["state"]
+        except Exception as e:
+            logger.error(f"Error parsing meta_data for conversation {conversation_id}: {e}")
+    
+    # Create CustomerState
+    try:
+        if state_data:
             state = CustomerState(
                 query=request.text,
                 user_id=request.user_id,
-                language=lang,
-                session_id=session_id,
-                conversation_history=history_dicts,
+                language=language,
+                conversation_id=conversation_id,  # Use consistent naming
+                conversation_history=history,
                 mall_id=request.mall_id,
+                **state_data
             )
-    else:
-        state = CustomerState(
-            query=request.text,
-            user_id=request.user_id,
-            language=lang,
-            session_id=session_id,
-            conversation_history=history_dicts,
-            mall_id=request.mall_id,
+        else:
+            state = CustomerState(
+                query=request.text,
+                user_id=request.user_id,
+                language=language,
+                conversation_id=conversation_id,  # Use consistent naming
+                conversation_history=history,
+                mall_id=request.mall_id
+            )
+        
+        # Process the request through the graph
+        with trace(name="CustomerChat", inputs={"query": request.text, "user_id": request.user_id, "mall_id": request.mall_id}):
+            result = await customer_graph.ainvoke(state)
+        
+        # Add the new messages to the history
+        await add_message(conversation_id, "user", request.text)
+        await add_message(conversation_id, "assistant", result["response"])
+        
+        # Update conversation history in the result
+        updated_history = history + [
+            {"role": "user", "content": request.text},
+            {"role": "assistant", "content": result["response"]}
+        ]
+        result["conversation_history"] = updated_history
+        
+        # Save state to meta_data
+        meta_data = {"language": language, "state": result}
+        await db_execute_async(
+            "UPDATE conversations SET meta_data = $1 WHERE id = $2",
+            (json.dumps(meta_data, cls=DateTimeEncoder), conversation_id)
         )
-
-    # Process the request
-    with trace(name="CustomerChat", inputs={"query": request.text, "user_id": request.user_id, "mall_id": request.mall_id}):
-        result = await customer_graph.ainvoke(state)
-
-    # Update conversation history in the result
-    result["conversation_history"] = history_dicts + [
-        {"role": "user", "content": request.text},
-        {"role": "assistant", "content": result["response"]}
-    ]
-
-    # Save updated state
-    state_json = json.dumps(result, cls=DateTimeEncoder)
-    await db_execute_async(
-        "UPDATE conversations SET current_state = $1 WHERE session_id = $2",
-        (state_json, session_id),
-    )
-
-    # Add messages to conversation_messages table
-    await add_message_to_conversation(session_id, "user", request.text)
-    await add_message_to_conversation(session_id, "assistant", result["response"])
-
-    await asyncio.to_thread(REDIS_CLIENT.delete, f"history:{session_id}")
-
-    return ChatResponse(message=result["response"], session_id=session_id)
+        
+        # Return the response
+        return ChatResponse(
+            message=result["response"], 
+            conversation_id=conversation_id
+        )
+    
+    except Exception as e:
+        logger.error(f"Error processing chat request: {e}")
+        raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
 
 @app.post("/tenant/update")
 async def tenant_update(request: UpdateRequest):
@@ -175,39 +258,46 @@ async def tenant_update(request: UpdateRequest):
         raise HTTPException(status_code=403, detail="Invalid tenant ID")
     
     lang = request.language or "en"
-    logger.info(f"Getting or creating session for user_id: {request.user_id}, lang: {lang}")
-    session_id = await get_or_create_session(request.session_id, request.user_id, lang)
+    logger.info(f"Getting or creating conversation for user_id: {request.user_id}, lang: {lang}")
+    conversation_id = await create_conversation(request.user_id, lang)
     
-    logger.info(f"Fetching conversation state for session_id: {session_id}")
+    logger.info(f"Fetching conversation state for conversation_id: {conversation_id}")
     conv_state = await db_fetch_one_async(
-        "SELECT current_state FROM conversations WHERE session_id = $1",
-        (session_id,)
+        "SELECT meta_data FROM conversations WHERE id = $1",
+        (conversation_id,)
     )
-    history = await get_conversation_history(session_id)
-    history_dicts = [{"role": msg.role, "content": msg.content} for msg in history]
+    history = await get_history(conversation_id)
     
-    if conv_state and conv_state.get("current_state"):
+    state_dict = {}
+    if conv_state and conv_state.get("meta_data"):
         try:
-            state_dict = json.loads(conv_state["current_state"])
+            meta_data = json.loads(conv_state["meta_data"])
+            if "state" in meta_data:
+                state_dict = meta_data["state"]
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error(f"Invalid meta_data for conversation {conversation_id}: {e}")
+    
+    if state_dict:
+        try:
             state = TenantState(**state_dict)
             state.query = request.text
-            state.conversation_history = history_dicts
+            state.conversation_history = history
         except (json.JSONDecodeError, ValueError):
-            logger.error(f"Invalid state data for session {session_id}, resetting to new state")
+            logger.error(f"Invalid state data for conversation {conversation_id}, resetting to new state")
             state = TenantState(
                 query=request.text,
                 user_id=request.user_id,
                 language=lang,
-                session_id=session_id,
-                conversation_history=history_dicts
+                conversation_id=conversation_id,
+                conversation_history=history
             )
     else:
         state = TenantState(
             query=request.text,
             user_id=request.user_id,
             language=lang,
-            session_id=session_id,
-            conversation_history=history_dicts
+            conversation_id=conversation_id,
+            conversation_history=history
         )
 
     # Process the request
@@ -216,18 +306,20 @@ async def tenant_update(request: UpdateRequest):
         result = await tenant_graph.ainvoke(state)
     
     logger.info(f"Tenant graph result: {result['response']}")
-    state_json = json.dumps(result, cls=DateTimeEncoder)
+    # Save updated state in meta_data
+    meta_data = {"language": lang, "state": result}
+    meta_data_json = json.dumps(meta_data, cls=DateTimeEncoder)
     await db_execute_async(
-        "UPDATE conversations SET current_state = $1 WHERE session_id = $2",
-        (state_json, session_id)
+        "UPDATE conversations SET meta_data = $1 WHERE id = $2",
+        (meta_data_json, conversation_id)
     )
     
-    await add_message_to_conversation(session_id, "user", request.text)
-    await add_message_to_conversation(session_id, "assistant", result["response"])
+    await add_message(conversation_id, "user", request.text)
+    await add_message(conversation_id, "assistant", result["response"])
 
-    await asyncio.to_thread(REDIS_CLIENT.delete, f"history:{session_id}")
+    await asyncio.to_thread(REDIS_CLIENT.delete, f"history:{conversation_id}")
     
-    return {"message": result["response"], "session_id": session_id}
+    return {"message": result["response"], "conversation_id": conversation_id}
 
 @app.get("/")
 async def root():
@@ -235,5 +327,5 @@ async def root():
 
 @app.get("/malls")
 async def get_malls():
-    malls = await db_fetch_all_async("SELECT mall_id, name_en FROM malls")
+    malls = await db_fetch_all_async("SELECT unique_property_id as mall_id, marketing_name as name_en FROM malls")
     return [{"mall_id": str(mall["mall_id"]), "name_en": mall["name_en"]} for mall in malls]
