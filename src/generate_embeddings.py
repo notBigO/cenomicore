@@ -86,11 +86,15 @@ def convert_metadata(metadata):
             converted[key] = value
     return converted
 
-def upsert_embeddings(data, id_prefix, text_field_en, text_field_ar, metadata_fields):
+def upsert_embeddings(data, id_prefix, text_field_en, text_field_ar, metadata_fields=None):
     vectors = []
     for item in data:
         text_en = item[text_field_en] if item[text_field_en] is not None else ""
         text_ar = item[text_field_ar] if item[text_field_ar] is not None else ""
+
+        # If metadata_fields is None, use all fields
+        if metadata_fields is None:
+            metadata_fields = item.keys()
 
         embedding_en = model.encode(text_en).tolist()
         vector_id_en = f"{id_prefix}_{item['id']}_en"
@@ -119,20 +123,30 @@ def main():
     # 1. Malls (previously unique_properties)
     malls_query = """
         SELECT id, unique_property_id, marketing_name AS name_en, marketing_name_ar AS name_ar, 
-        city, country, mall_information
+        city, country, mall_information, image, gps_coordinates, property_group_id,
+        created_at, updated_at
         FROM malls
     """
     malls = fetch_data(malls_query)
     upsert_embeddings(
         malls, "mall", "name_en", "name_ar",
-        ["id", "unique_property_id", "name_en", "name_ar", "city", "country", "mall_information"]
+        ["id", "unique_property_id", "name_en", "name_ar", "city", "country", "mall_information", 
+         "image", "gps_coordinates", "property_group_id", "created_at", "updated_at"]
     )
 
     # 2. Brands (previously stores)
     brands_query = """
         SELECT b.id, b.brand_id, b.brand_name_en AS name_en, b.brand_name_ar AS name_ar, 
         b.category_name AS category_en, b.category_name_ar AS category_ar,
-        b.description_en, b.description_ar, bma.unique_property_id AS mall_id
+        b.description_en, b.description_ar, b.company_name_en, b.company_name_ar,
+        b.group_name, b.group_name_ar, b.tenant_profile_id, b.brand_profile_id,
+        b.store_phone_code, b.store_phone_number, b.store_email, b.store_website,
+        b.publish_date, b.is_published, b.anchor_brand, b.brand_logo,
+        b.social_tiktok, b.social_instagram, b.social_facebook, b.social_threads,
+        b.social_twitter, b.social_snapchat, b.social_youtube,
+        b.banner_en, b.banner_ar, b.images_en, b.images_ar, b.tags_en, b.tags_ar,
+        b.pms_unit_codes, b.created_at, b.updated_at,
+        bma.unique_property_id AS mall_id
         FROM brands b
         JOIN brand_mall_association bma ON b.brand_id = bma.brand_id
     """
@@ -140,12 +154,21 @@ def main():
     upsert_embeddings(
         brands, "store", "name_en", "name_ar",
         ["id", "brand_id", "name_en", "name_ar", "category_en", "category_ar", 
-         "description_en", "description_ar", "mall_id"]
+         "description_en", "description_ar", "company_name_en", "company_name_ar",
+         "group_name", "group_name_ar", "tenant_profile_id", "brand_profile_id",
+         "store_phone_code", "store_phone_number", "store_email", "store_website",
+         "publish_date", "is_published", "anchor_brand", "brand_logo",
+         "social_tiktok", "social_instagram", "social_facebook", "social_threads",
+         "social_twitter", "social_snapchat", "social_youtube",
+         "banner_en", "banner_ar", "images_en", "images_ar", "tags_en", "tags_ar", 
+         "pms_unit_codes", "created_at", "updated_at", "mall_id"]
     )
 
     # 3. Products
     products_query = """
-        SELECT p.id, p.name, p.category, p.brand_id, b.brand_name_en, bma.unique_property_id AS mall_id
+        SELECT p.id, p.name, p.description, p.price, p.category, p.brand_id, 
+        p.is_featured, p.in_stock, p.image_url, p.attributes, p.created_at, p.updated_at,
+        b.brand_name_en, bma.unique_property_id AS mall_id
         FROM products p
         JOIN brands b ON p.brand_id = b.brand_id
         JOIN brand_mall_association bma ON b.brand_id = bma.brand_id
@@ -154,33 +177,43 @@ def main():
     # Since products table doesn't seem to have AR fields, we'll use the same field for both
     upsert_embeddings(
         products, "product", "name", "name",
-        ["id", "brand_id", "name", "category", "brand_name_en", "mall_id"]
+        ["id", "brand_id", "name", "description", "price", "category", "brand_name_en", "mall_id",
+         "is_featured", "in_stock", "image_url", "attributes", "created_at", "updated_at"]
     )
 
     # 4. Engagements (previously offers/events)
     engagements_query = """
         SELECT e.id, e.engagement_id, e.brand_id, e.unique_property_id AS mall_id,
         e.title_en AS name_en, e.title_ar AS name_ar, e.type,
-        e.description_en, e.description_ar, e.start_date, e.end_date
+        e.description_en, e.description_ar, e.terms_conditions_en, e.terms_conditions_ar,
+        e.start_date, e.end_date, e.publish_date, e.is_exclusive, e.ext_url,
+        e.home_banner_disp, e.images_en, e.images_ar, e.tags_en, e.tags_ar,
+        e.tenant_profile_id, e.created_at, e.updated_at
         FROM engagements e
     """
     engagements = fetch_data(engagements_query)
     upsert_embeddings(
         engagements, "engagement", "name_en", "name_ar",
         ["id", "engagement_id", "brand_id", "mall_id", "name_en", "name_ar", "type",
-         "description_en", "description_ar", "start_date", "end_date"]
+         "description_en", "description_ar", "terms_conditions_en", "terms_conditions_ar",
+         "start_date", "end_date", "publish_date", "is_exclusive", "ext_url", 
+         "home_banner_disp", "images_en", "images_ar", "tags_en", "tags_ar",
+         "tenant_profile_id", "created_at", "updated_at"]
     )
 
     # 5. Services
     services_query = """
-        SELECT s.id, s.name, s.unique_property_id AS mall_id
+        SELECT s.id, s.name, s.name_ar, s.description, s.description_ar, s.icon_url,
+        s.is_available, s.location, s.unique_property_id AS mall_id,
+        s.created_at, s.updated_at
         FROM services s
     """
     services = fetch_data(services_query)
-    # Since services table doesn't seem to have AR fields, we'll use the same field for both
+    # Using name_ar if available, falling back to name if not
     upsert_embeddings(
-        services, "service", "name", "name",
-        ["id", "name", "mall_id"]
+        services, "service", "name", "name_ar",
+        ["id", "name", "name_ar", "description", "description_ar", "icon_url",
+         "is_available", "location", "mall_id", "created_at", "updated_at"]
     )
 
     print("All embeddings successfully uploaded to Pinecone!")

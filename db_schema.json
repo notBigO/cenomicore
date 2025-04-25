@@ -672,6 +672,13 @@
   "is_nullable": "YES"
 }, {
   "table_name": "products",
+  "column_name": "attributes",
+  "data_type": "jsonb",
+  "character_maximum_length": null,
+  "column_default": null,
+  "is_nullable": "YES"
+}, {
+  "table_name": "products",
   "column_name": "created_at",
   "data_type": "timestamp without time zone",
   "character_maximum_length": null,
