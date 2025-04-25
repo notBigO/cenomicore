@@ -152,107 +152,102 @@ async def get_history(conversation_id: str, max_messages: int = 20) -> List[Dict
 # Main chat endpoint
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    # Set language based on request or detect from text
-    language = request.language or detect_language(request.text)
-    
-    # Get or create conversation
-    conversation_id = request.conversation_id
-    if not conversation_id:
-        # Create a new conversation
-        conversation_id = await create_conversation(request.user_id, language)
-    else:
-        # Update the last activity timestamp for existing conversation
-        await db_execute_async(
-            "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+    try:
+        # Set language based on request or detect from text
+        language = request.language or detect_language(request.text)
+        
+        # Get or create conversation using utility function
+        conversation_id = await get_or_create_conversation(request.conversation_id, request.user_id, language)
+        
+        # Get conversation history
+        history = await get_history(conversation_id)
+        
+        # Load state from meta_data
+        conv_data = await db_fetch_one_async(
+            "SELECT meta_data FROM conversations WHERE id = $1",
             (conversation_id,)
         )
-    
-    # Get conversation history
-    history = await get_history(conversation_id)
-    
-    # Load state from meta_data
-    conv_data = await db_fetch_one_async(
-        "SELECT meta_data FROM conversations WHERE id = $1",
-        (conversation_id,)
-    )
-    
-    # Initialize state
-    state_data = {}
-    if conv_data and conv_data.get("meta_data"):
+        
+        # Initialize state
+        state_data = {}
+        if conv_data and conv_data.get("meta_data"):
+            try:
+                meta_data = json.loads(conv_data["meta_data"])
+                if "state" in meta_data:
+                    state_data = meta_data["state"]
+            except Exception as e:
+                logger.error(f"Error parsing meta_data for conversation {conversation_id}: {e}")
+        
+        # Create CustomerState
         try:
-            meta_data = json.loads(conv_data["meta_data"])
-            if "state" in meta_data:
-                state_data = meta_data["state"]
-        except Exception as e:
-            logger.error(f"Error parsing meta_data for conversation {conversation_id}: {e}")
-    
-    # Create CustomerState
-    try:
-        if state_data:
-            # Remove duplicated parameters from state_data to avoid multiple values
-            if 'query' in state_data:
-                del state_data['query']
-            if 'user_id' in state_data:
-                del state_data['user_id']
-            if 'language' in state_data:
-                del state_data['language']
-            if 'conversation_id' in state_data:
-                del state_data['conversation_id']
-            if 'conversation_history' in state_data:
-                del state_data['conversation_history']
-            if 'mall_id' in state_data:
-                del state_data['mall_id']
+            if state_data:
+                # Remove duplicated parameters from state_data to avoid multiple values
+                if 'query' in state_data:
+                    del state_data['query']
+                if 'user_id' in state_data:
+                    del state_data['user_id']
+                if 'language' in state_data:
+                    del state_data['language']
+                if 'conversation_id' in state_data:
+                    del state_data['conversation_id']
+                if 'conversation_history' in state_data:
+                    del state_data['conversation_history']
+                if 'mall_id' in state_data:
+                    del state_data['mall_id']
+                
+                state = CustomerState(
+                    query=request.text,
+                    user_id=request.user_id,
+                    language=language,
+                    conversation_id=conversation_id,
+                    conversation_history=history,
+                    mall_id=request.mall_id,
+                    **state_data
+                )
+            else:
+                state = CustomerState(
+                    query=request.text,
+                    user_id=request.user_id,
+                    language=language,
+                    conversation_id=conversation_id,
+                    conversation_history=history,
+                    mall_id=request.mall_id
+                )
             
-            state = CustomerState(
-                query=request.text,
-                user_id=request.user_id,
-                language=language,
-                conversation_id=conversation_id,
-                conversation_history=history,
-                mall_id=request.mall_id,
-                **state_data
+            # Process the request through the graph
+            with trace(name="CustomerChat", inputs={"query": request.text, "user_id": request.user_id, "mall_id": request.mall_id}):
+                result = await customer_graph.ainvoke(state)
+            
+            # Add the new messages to the history
+            await add_message(conversation_id, "user", request.text)
+            await add_message(conversation_id, "assistant", result["response"])
+            
+            # Update conversation history in the result
+            updated_history = history + [
+                {"role": "user", "content": request.text},
+                {"role": "assistant", "content": result["response"]}
+            ]
+            result["conversation_history"] = updated_history
+            
+            # Save state to meta_data
+            meta_data = {"language": language, "state": result}
+            await db_execute_async(
+                "UPDATE conversations SET meta_data = $1 WHERE id = $2",
+                (json.dumps(meta_data, cls=DateTimeEncoder), conversation_id)
             )
-        else:
-            state = CustomerState(
-                query=request.text,
-                user_id=request.user_id,
-                language=language,
-                conversation_id=conversation_id,
-                conversation_history=history,
-                mall_id=request.mall_id
+            
+            # Return the response
+            return ChatResponse(
+                message=result["response"], 
+                conversation_id=conversation_id
             )
         
-        # Process the request through the graph
-        with trace(name="CustomerChat", inputs={"query": request.text, "user_id": request.user_id, "mall_id": request.mall_id}):
-            result = await customer_graph.ainvoke(state)
-        
-        # Add the new messages to the history
-        await add_message(conversation_id, "user", request.text)
-        await add_message(conversation_id, "assistant", result["response"])
-        
-        # Update conversation history in the result
-        updated_history = history + [
-            {"role": "user", "content": request.text},
-            {"role": "assistant", "content": result["response"]}
-        ]
-        result["conversation_history"] = updated_history
-        
-        # Save state to meta_data
-        meta_data = {"language": language, "state": result}
-        await db_execute_async(
-            "UPDATE conversations SET meta_data = $1 WHERE id = $2",
-            (json.dumps(meta_data, cls=DateTimeEncoder), conversation_id)
-        )
-        
-        # Return the response
-        return ChatResponse(
-            message=result["response"], 
-            conversation_id=conversation_id
-        )
-    
+        except Exception as e:
+            logger.error(f"Error processing chat request: {e}")
+            raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
     except Exception as e:
         logger.error(f"Error processing chat request: {e}")
-        raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/tenant/update")
 async def tenant_update(request: UpdateRequest):
@@ -273,7 +268,9 @@ async def tenant_update(request: UpdateRequest):
     
     lang = request.language or "en"
     logger.info(f"Getting or creating conversation for user_id: {request.user_id}, lang: {lang}")
-    conversation_id = await create_conversation(request.user_id, lang)
+    
+    # Get or create conversation using utility function
+    conversation_id = await get_or_create_conversation(request.conversation_id, request.user_id, lang)
     
     logger.info(f"Fetching conversation state for conversation_id: {conversation_id}")
     conv_state = await db_fetch_one_async(

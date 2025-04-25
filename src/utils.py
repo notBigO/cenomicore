@@ -96,21 +96,36 @@ def detect_language(text: str) -> str:
 
 async def get_or_create_conversation(conversation_id: Optional[str], user_id: Optional[str], language: str) -> str:
     if conversation_id:
-        await db_execute_async(
-            "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+        # Check if the conversation exists
+        existing_conversation = await db_fetch_one_async(
+            "SELECT id FROM conversations WHERE id = $1",
             (conversation_id,)
         )
-        return conversation_id
+        if existing_conversation:
+            # Update existing conversation
+            await db_execute_async(
+                "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+                (conversation_id,)
+            )
+            return conversation_id
+        else:
+            # Create new conversation if the provided ID doesn't exist
+            logger.info(f"Conversation {conversation_id} not found, creating new conversation")
+            return await create_new_conversation(user_id, language)
     else:
-        new_conversation_id = str(uuid.uuid4())
-        user_id_clean = user_id[2:] if user_id and user_id.startswith(("t_", "c_")) else user_id
-        # Store language and state in meta_data as JSON
-        meta_data = json.dumps({"language": language, "state": {}})
-        await db_execute_async(
-            "INSERT INTO conversations (id, user_id, meta_data) VALUES ($1, $2, $3)",
-            (new_conversation_id, user_id_clean, meta_data)
-        )
-        return new_conversation_id
+        # Create a new conversation
+        return await create_new_conversation(user_id, language)
+
+async def create_new_conversation(user_id: Optional[str], language: str) -> str:
+    new_conversation_id = str(uuid.uuid4())
+    user_id_clean = user_id[2:] if user_id and user_id.startswith(("t_", "c_")) else user_id
+    # Store language and state in meta_data as JSON
+    meta_data = json.dumps({"language": language, "state": {}})
+    await db_execute_async(
+        "INSERT INTO conversations (id, user_id, meta_data, created_at, updated_at) VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        (new_conversation_id, user_id_clean, meta_data)
+    )
+    return new_conversation_id
 
 async def add_message_to_conversation(conversation_id: str, role: str, content: str):
     # Get the current max message_index
