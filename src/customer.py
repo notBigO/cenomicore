@@ -147,83 +147,63 @@ intent_classification_prompt = PromptTemplate(
 )
 intent_chain = intent_classification_prompt | llm | StrOutputParser()
 
-# Customer Response Prompt
+# Updated Customer Response Prompt
 customer_prompt = PromptTemplate(
     input_variables=["context", "query", "lang", "conversation_history", "mall_name", "resolved_entity"],
     template="""
-    You are CenomiAI, a friendly, proactive, and highly knowledgeable assistant for {mall_name} mall. 
+    You are CenomiAI, a professional and knowledgeable assistant for {mall_name} mall.
     
     # Core Identity
-    - Respond in {lang} with a warm, conversational tone
-    - Use appropriate emojis 😊 to keep interaction engaging without overusing them
-    - Your purpose is to be the definitive source of information about {mall_name} mall
+    - Respond in {lang} with a concise, professional tone
+    - Use emojis 😊 sparingly to keep interactions engaging
+    - Provide accurate, precise information about {mall_name} mall
     
     # Context Awareness
-    - Always reference the most recent conversation history to maintain continuity: {conversation_history}
-    - If a resolved entity is provided (e.g., "{resolved_entity}"), treat it as the subject of the query unless contradicted
-    - When users refer to something previously mentioned ("it", "that store", "those products"), connect back to the resolved entity or specific items from earlier in the conversation
-    - If the user asks follow-up questions, ensure your answers build on previous exchanges rather than starting fresh
-    - For multi-part questions, address each component thoroughly
+    - Maintain continuity based on: {conversation_history}
+    - Use resolved entity "{resolved_entity}" as the subject unless contradicted
+    - Connect to previously mentioned entities without explicitly stating "since we were talking about X"
+    - For follow-up questions, build on previous exchanges without restating context
     
     # Response Guidelines
     
     ## Store Information
-    - Provide specific details: exact location (floor, section), operating hours, contact information
-    - Include relevant category and description of what the store offers
-    - If the user asks about a store not mentioned in context, acknowledge this and suggest similar stores in {mall_name}
+    - Format location codes properly: 
+      * "FF" = "First Floor" (e.g., FF08 becomes "First Floor, Shop #08")
+      * "GF" = "Ground Floor" (e.g., GF12 becomes "Ground Floor, Shop #12") 
+      * "BSW" = "Basement West" (e.g., BSW001 becomes "Basement West, Shop #001")
+    - Show only 3-5 location codes maximum and mention "and additional locations" if there are more
+    - Include category and description of store offerings
+    - For neighboring stores, highlight those with adjacent shop numbers on the same floor
     
-    ## Product Queries (including shopping lists)
-    - For each item requested, match to specific stores that carry it in {mall_name}
-    - Include product details: price, availability, features, and store location
-    - For lists, organize recommendations by store location to create an efficient shopping route
-    - Structure as a clear, numbered list when responding to multiple items
-    
-    ## Dining Recommendations
-    - Suggest restaurants based on cuisine type, price range, dietary requirements, or ambiance
-    - Include location details, specialty dishes, and current promotions
-    - For families, highlight kid-friendly options and special menus
-    - Mention seating availability (food court vs. sit-down restaurant)
+    ## Product Queries
+    - Include price, availability, features, and formatted store location
+    - Structure as clear, numbered lists for multiple items
     
     ## Offers & Events
-    - Highlight current promotions with specific details (discount amounts, conditions, end dates)
-    - Connect offers to user's interests based on conversation history
-    - For events, include dates, times, locations, and any registration requirements
-    - Personalize recommendations based on previous interactions
-    - If a specific store is mentioned or implied (e.g., "they"), list its offers.
-    - If no offers exist for that store, say so gracefully and suggest offers from similar stores by category (e.g., fashion, electronics).
+    - Include specific details (discount amounts, conditions, dates) for both offers and events
+    - If a specific store is mentioned, list its offers/events directly without saying "Since we were talking about X..."
     
     ## Navigation Assistance
-    - Provide clear, step-by-step directions within {mall_name}
-    - Reference landmarks and store names as navigation points
-    - Mention transportation options (elevators, escalators, walking distances)
-    - If starting point isn't specified, provide directions from main entrance or information desk
-    
-    ## Vague/Open-Ended Queries
-    - For broad requests ("What's good here?", "I'm so bored", "I'm so hungry"), propose a structured plan with multiple options
-    - Segment recommendations by categories (shopping, dining, entertainment)
-    - Ground suggestions in user's previous interests if available from conversation history
-    - Present a clear, actionable itinerary that covers different areas of the mall
-    
-    ## Personalization
-    - Remember and reference previous interactions within the same session
+    - Provide clear, step-by-step directions using proper floor names (not codes)
+    - Reference landmarks and nearby stores as navigation points
     
     # Special Handling Instructions
-    
-    - For complex queries, break down information into digestible sections
-    - If information is not available in context, clearly state this and provide the most relevant alternative from {mall_name}
-    - Always prioritize accuracy over completeness - if uncertain about details, acknowledge limitations
-    - Maintain consistent personality throughout the conversation, building rapport over multiple exchanges
-    - For time-sensitive queries, prioritize current events and ongoing promotions
+    - Keep responses concise and to the point
+    - Format location codes in human-readable form (e.g., "First Floor, Shop #12" instead of "FF12")
+    - Avoid overwhelming users with too many location codes at once
+    - When asked about neighboring stores, identify those with similar location codes
+    - For services and amenities, provide complete details including location and description
+    - Avoid self-reassuring phrases like "Since we were talking about Zara..." - instead, directly address the question
     
     # Contextual Information Processing
     
     Carefully analyze the provided context about {mall_name}:
     {context}
     
-    Review the full conversation history to maintain continuity:
+    Review the conversation history to maintain continuity without explicitly mentioning it:
     {conversation_history}
     
-    Now respond to the current query with complete, helpful information:
+    Now respond to the current query with concise, professional information:
     "{query}"
     """
 )
@@ -360,7 +340,7 @@ async def initial_retrieval(state: CustomerState) -> CustomerState:
 
 async def refine_context(state: CustomerState) -> CustomerState:
     if not state.mall_id:
-        state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
+        state.response = "Please select a mall first."
         return state
 
     context = {
@@ -371,6 +351,7 @@ async def refine_context(state: CustomerState) -> CustomerState:
         "services": [],
         "amenities": [],
         "mall_name": "",
+        "neighboring_stores": []  # New field for neighboring stores
     }
     
     # Get mall name
@@ -427,40 +408,102 @@ async def refine_context(state: CustomerState) -> CustomerState:
             context["events"].append(event_data)
 
     # For store queries, make sure to fetch ALL stores for a given mall
-    if state.intent.startswith("store_"):
-        store_name = state.context_data.get("resolved_entity", "").lower()
+    store_name = state.context_data.get("resolved_entity", "").lower() if state.context_data else ""
+    target_store_data = None
+    
+    # Always fetch all stores for complete data
+    all_stores = await db_fetch_all_async(
+        """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
+           b.store_phone_number, b.store_email, b.store_website, b.pms_unit_codes
+           FROM brands b 
+           JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+           WHERE bma.unique_property_id = $1""", 
+        (state.mall_id,)
+    )
+    
+    for store in all_stores:
+        store_data = {
+            "name": store["brand_name_en"],
+            "category": store.get("category_name", ""),
+            "store_id": store["brand_id"],
+            "description": store.get("description_en", ""),
+            "phone": store.get("store_phone_number", ""),
+            "email": store.get("store_email", ""),
+            "website": store.get("store_website", ""),
+            "location": store.get("pms_unit_codes", {})
+        }
         
-        # Fetch all stores for this mall directly from database for accuracy
-        all_stores = await db_fetch_all_async(
-            """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
-               b.store_phone_number, b.store_email, b.store_website, b.pms_unit_codes
-               FROM brands b 
-               JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
-               WHERE bma.unique_property_id = $1""", 
-            (state.mall_id,)
-        )
+        # If this is the store being searched for, put it at the top and remember it for finding neighbors
+        if store_name and store_name in store["brand_name_en"].lower():
+            context["stores"].insert(0, store_data)
+            target_store_data = store_data
+        else:
+            context["stores"].append(store_data)
+    
+    # Find neighboring stores if a specific store was searched for
+    if target_store_data and target_store_data.get("location"):
+        # Extract location codes for the target store
+        location_codes = target_store_data["location"]
+        neighboring_stores = []
         
-        for store in all_stores:
-            store_data = {
-                "name": store["brand_name_en"],
-                "category": store.get("category_name", ""),
-                "store_id": store["brand_id"],
-                "description": store.get("description_en", ""),
-                "phone": store.get("store_phone_number", ""),
-                "email": store.get("store_email", ""),
-                "website": store.get("store_website", ""),
-                "location": store.get("pms_unit_codes", {})
-            }
-            
-            # If this is the store being searched for, put it at the top
-            if store_name and store_name in store["brand_name_en"].lower():
-                context["stores"].insert(0, store_data)
-            else:
-                context["stores"].append(store_data)
+        # Function to parse location code and find neighbors
+        def get_location_prefix_and_number(code):
+            import re
+            if not isinstance(code, str):
+                return None, None
+                
+            match = re.match(r'([A-Za-z]+)(\d+.*)', code)
+            if match:
+                prefix, number_part = match.groups()
+                try:
+                    number = int(re.match(r'(\d+)', number_part).group(1))
+                    return prefix, number
+                except (ValueError, AttributeError):
+                    return None, None
+            return None, None
+        
+        # Find stores with adjacent location codes
+        for location_code in location_codes:
+            prefix, number = get_location_prefix_and_number(location_code)
+            if prefix and number is not None:
+                # Check for adjacent numbers (±1, ±2)
+                adjacent_codes = [
+                    f"{prefix}{number-2}", f"{prefix}{number-1}", 
+                    f"{prefix}{number+1}", f"{prefix}{number+2}"
+                ]
+                
+                for store in context["stores"]:
+                    if store == target_store_data:
+                        continue
+                    
+                    store_locations = store.get("location", [])
+                    if any(code in adjacent_codes for code in store_locations):
+                        if store not in neighboring_stores:
+                            neighboring_stores.append(store)
+        
+        # Add neighboring stores to context
+        context["neighboring_stores"] = neighboring_stores[:5]  # Limit to 5 neighbors
+    
+    # Fetch service information using the correct column names from DB schema
+    services = await db_fetch_all_async(
+        """SELECT s.id AS service_id, s.name, s.description, s.location, s.is_available
+           FROM services s
+           WHERE s.unique_property_id = $1""",
+        (state.mall_id,)
+    )
+    
+    for service in services:
+        service_data = {
+            "name": service.get("name", ""),
+            "description": service.get("description", ""),
+            "location": service.get("location", ""),
+            "is_available": service.get("is_available", True)
+        }
+        context["services"].append(service_data)
     
     # Fetch product details including price
-    if state.intent.startswith("product_"):
-        product_name = state.context_data.get("resolved_entity", "").lower()
+    if state.intent and state.intent.startswith("product_"):
+        product_name = state.context_data.get("resolved_entity", "").lower() if state.context_data else ""
         
         # Search for products either by name or for a specific store
         if product_name:
@@ -506,7 +549,7 @@ async def refine_context(state: CustomerState) -> CustomerState:
             continue
         
         doc_type = metadata.get("type")
-        if doc_type == "store" and not state.intent.startswith("store_"):
+        if doc_type == "store" and not (state.intent and state.intent.startswith("store_")):
             # Only add store from vector search if not already doing a direct store query
             store = {
                 "name": metadata.get("name_en"),
@@ -514,12 +557,12 @@ async def refine_context(state: CustomerState) -> CustomerState:
                 "store_id": metadata.get("brand_id"),
                 "description": metadata.get("description_en"),
             }
-            if store not in context["stores"]:
+            if not any(s.get("name") == store["name"] for s in context["stores"]):
                 context["stores"].append(store)
             if metadata.get("brand_id"):
                 brand_ids.add(metadata.get("brand_id"))
                 
-        elif doc_type == "product" and not state.intent.startswith("product_"):
+        elif doc_type == "product" and not (state.intent and state.intent.startswith("product_")):
             # Only add product from vector search if not already doing a direct product query
             product = {
                 "id": metadata.get("id"),
@@ -528,14 +571,19 @@ async def refine_context(state: CustomerState) -> CustomerState:
                 "category": metadata.get("category"),
                 "store_name": metadata.get("brand_name_en"),
             }
-            context["products"].append(product)
+            if not any(p.get("name") == product["name"] for p in context["products"]):
+                context["products"].append(product)
             if metadata.get("brand_id"):
                 brand_ids.add(metadata["brand_id"])
                 
         elif doc_type == "service":
-            context["services"].append({
+            service = {
                 "name": metadata.get("name"),
-            })
+                "description": metadata.get("description"),
+                "location": metadata.get("location")
+            }
+            if not any(s.get("name") == service["name"] for s in context["services"]):
+                context["services"].append(service)
 
     # Fetch additional brand details for products
     if brand_ids:
@@ -557,7 +605,7 @@ async def refine_context(state: CustomerState) -> CustomerState:
                     item["location"] = brand["pms_unit_codes"]
 
     # If no stores found but resolved entity exists, try a direct DB lookup
-    if not context["stores"] and state.context_data.get("resolved_entity"):
+    if not context["stores"] and state.context_data and state.context_data.get("resolved_entity"):
         store_name = state.context_data["resolved_entity"].lower()
         stores = await db_fetch_all_async(
             """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
