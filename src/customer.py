@@ -54,12 +54,11 @@ async def populate_knowledge_graph():
            JOIN brands b ON p.brand_id = b.brand_id"""
     )
     
-    # Fetch all engagements/offers with complete information
+    # Fetch ALL engagements (both offers and events) with complete information
     engagements = await db_fetch_all_async(
-        """SELECT e.engagement_id, e.title_en, e.description_en, e.brand_id, e.start_date, 
+        """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, e.start_date, 
            e.end_date, e.terms_conditions_en, e.is_exclusive, e.unique_property_id
-           FROM engagements e 
-           WHERE e.type = 'offer'"""
+           FROM engagements e"""
     )
     
     # Clear existing graph to rebuild it completely
@@ -96,10 +95,11 @@ async def populate_knowledge_graph():
         knowledge_graph.add_node(f"product_{product['id']}", **node_data)
         knowledge_graph.add_edge(f"brand_{product['brand_id']}", f"product_{product['id']}")
     
-    # Add engagements/offers to knowledge graph
+    # Add all engagements to knowledge graph
     for engagement in engagements:
+        engagement_type = engagement.get("type", "").lower()
         node_data = {
-            "type": "offer",
+            "type": engagement_type,
             "title": engagement.get("title_en", ""),
             "description": engagement.get("description_en", ""),
             "start_date": engagement.get("start_date", ""),
@@ -377,6 +377,55 @@ async def refine_context(state: CustomerState) -> CustomerState:
     mall = await db_fetch_one_async("SELECT marketing_name AS name_en FROM malls WHERE unique_property_id = $1", (state.mall_id,))
     context["mall_name"] = mall["name_en"] if mall else "Unknown Mall"
 
+    # Fetch all engagements (offers and events) without any date filtering
+    # to show past, current, and future engagements
+    engagements = await db_fetch_all_async(
+        """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
+           e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, e.unique_property_id
+           FROM engagements e 
+           WHERE e.unique_property_id = $1""",
+        (state.mall_id,)
+    )
+    
+    for engagement in engagements:
+        # Get associated brand information
+        brand = None
+        if engagement.get("brand_id"):
+            brand = await db_fetch_one_async(
+                "SELECT brand_name_en, category_name FROM brands WHERE brand_id = $1",
+                (engagement["brand_id"],)
+            )
+        
+        engagement_type = engagement.get("type", "").lower()
+        
+        if engagement_type == "offer":
+            offer_data = {
+                "id": engagement["engagement_id"],
+                "title": engagement.get("title_en", ""),
+                "description": engagement.get("description_en", ""),
+                "brand_id": engagement.get("brand_id"),
+                "store_name": brand["brand_name_en"] if brand else "Unknown Store",
+                "category": brand.get("category_name", "") if brand else "",
+                "start_date": engagement.get("start_date", ""),
+                "end_date": engagement.get("end_date", ""),
+                "terms": engagement.get("terms_conditions_en", ""),
+                "is_exclusive": bool(engagement.get("is_exclusive", 0))
+            }
+            context["offers"].append(offer_data)
+        
+        elif engagement_type == "event":
+            event_data = {
+                "id": engagement["engagement_id"],
+                "name": engagement.get("title_en", ""),
+                "description": engagement.get("description_en", ""),
+                "brand_id": engagement.get("brand_id"),
+                "store_name": brand["brand_name_en"] if brand else None,
+                "start_date": engagement.get("start_date", ""),
+                "end_date": engagement.get("end_date", ""),
+                "terms": engagement.get("terms_conditions_en", "")
+            }
+            context["events"].append(event_data)
+
     # For store queries, make sure to fetch ALL stores for a given mall
     if state.intent.startswith("store_"):
         store_name = state.context_data.get("resolved_entity", "").lower()
@@ -449,7 +498,7 @@ async def refine_context(state: CustomerState) -> CustomerState:
                 "in_stock": product.get("in_stock", True)
             })
 
-    # Process Pinecone results
+    # Process Pinecone results for other entities that might be relevant
     brand_ids = set()
     for doc in state.initial_context or []:
         metadata = doc["metadata"]
@@ -470,28 +519,6 @@ async def refine_context(state: CustomerState) -> CustomerState:
             if metadata.get("brand_id"):
                 brand_ids.add(metadata.get("brand_id"))
                 
-        elif doc_type == "engagement":
-            # Determine if this is an offer or event based on type
-            engagement_type = metadata.get("type", "").lower()
-            if engagement_type == "offer":
-                offer = {
-                    "id": metadata.get("engagement_id"),
-                    "description": metadata.get("description_en"),
-                    "brand_id": metadata.get("brand_id"),
-                    "store_name": "",  # Will be filled in later
-                    "start_date": metadata.get("start_date"),
-                    "end_date": metadata.get("end_date")
-                }
-                context["offers"].append(offer)
-                if metadata.get("brand_id"):
-                    brand_ids.add(metadata["brand_id"])
-            elif engagement_type == "event":
-                context["events"].append({
-                    "name": metadata.get("name_en"),
-                    "date": metadata.get("start_date"),
-                    "description": metadata.get("description_en"),
-                })
-                
         elif doc_type == "product" and not state.intent.startswith("product_"):
             # Only add product from vector search if not already doing a direct product query
             product = {
@@ -510,7 +537,7 @@ async def refine_context(state: CustomerState) -> CustomerState:
                 "name": metadata.get("name"),
             })
 
-    # Fetch additional brand details for offers and products
+    # Fetch additional brand details for products
     if brand_ids:
         brands = await db_fetch_all_async(
             """SELECT brand_id, brand_name_en, category_name, description_en, 
@@ -520,7 +547,7 @@ async def refine_context(state: CustomerState) -> CustomerState:
         )
         brand_map = {b["brand_id"]: b for b in brands}
         
-        for item in context["offers"] + context["products"]:
+        for item in context["products"]:
             if item.get("brand_id") in brand_map and not item.get("store_name"):
                 brand = brand_map[item["brand_id"]]
                 item["store_name"] = brand["brand_name_en"]
