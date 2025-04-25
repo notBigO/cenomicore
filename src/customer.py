@@ -37,23 +37,78 @@ llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", api_key=GEMINI_API_KEY)
 knowledge_graph = nx.Graph()
 
 async def populate_knowledge_graph():
+    # Fetch all brands with complete information including PMS unit codes for location
     brands = await db_fetch_all_async(
-        "SELECT b.brand_id, b.brand_name_en, bma.unique_property_id FROM brands b JOIN brand_mall_association bma ON b.brand_id = bma.brand_id"
+        """SELECT b.brand_id, b.brand_name_en, b.brand_name_ar, b.category_name, 
+           b.description_en, b.store_phone_number, b.store_email, b.store_website,
+           b.pms_unit_codes, bma.unique_property_id 
+           FROM brands b 
+           JOIN brand_mall_association bma ON b.brand_id = bma.brand_id"""
     )
-    products = await db_fetch_all_async("SELECT id, name, brand_id FROM products")
+    
+    # Fetch all products with complete information including price
+    products = await db_fetch_all_async(
+        """SELECT p.id, p.name, p.description, p.price, p.category, p.brand_id, 
+           p.is_featured, p.in_stock, b.brand_name_en
+           FROM products p
+           JOIN brands b ON p.brand_id = b.brand_id"""
+    )
+    
+    # Fetch all engagements/offers with complete information
     engagements = await db_fetch_all_async(
-        "SELECT engagement_id, description_en, brand_id FROM engagements WHERE type = 'offer'"
+        """SELECT e.engagement_id, e.title_en, e.description_en, e.brand_id, e.start_date, 
+           e.end_date, e.terms_conditions_en, e.is_exclusive, e.unique_property_id
+           FROM engagements e 
+           WHERE e.type = 'offer'"""
     )
     
-    for brand in brands:
-        knowledge_graph.add_node(f"brand_{brand['brand_id']}", type="store", name=brand["brand_name_en"], mall_id=brand["unique_property_id"])
+    # Clear existing graph to rebuild it completely
+    knowledge_graph.clear()
     
+    # Add brands/stores to knowledge graph with all available information
+    for brand in brands:
+        node_data = {
+            "type": "store",
+            "name": brand["brand_name_en"],
+            "name_ar": brand.get("brand_name_ar", ""),
+            "category": brand.get("category_name", ""),
+            "description": brand.get("description_en", ""),
+            "phone": brand.get("store_phone_number", ""),
+            "email": brand.get("store_email", ""),
+            "website": brand.get("store_website", ""),
+            "mall_id": brand["unique_property_id"],
+            "location": brand.get("pms_unit_codes", {})  # PMS codes for location
+        }
+        knowledge_graph.add_node(f"brand_{brand['brand_id']}", **node_data)
+    
+    # Add products to knowledge graph with complete information including price
     for product in products:
-        knowledge_graph.add_node(f"product_{product['id']}", type="product", name=product["name"])
+        node_data = {
+            "type": "product",
+            "name": product["name"],
+            "description": product.get("description", ""),
+            "price": float(product["price"]) if product.get("price") is not None else None,
+            "category": product.get("category", ""),
+            "brand_name": product.get("brand_name_en", ""),
+            "in_stock": product.get("in_stock", True),
+            "is_featured": product.get("is_featured", False)
+        }
+        knowledge_graph.add_node(f"product_{product['id']}", **node_data)
         knowledge_graph.add_edge(f"brand_{product['brand_id']}", f"product_{product['id']}")
     
+    # Add engagements/offers to knowledge graph
     for engagement in engagements:
-        knowledge_graph.add_node(f"engagement_{engagement['engagement_id']}", type="offer", description=engagement["description_en"])
+        node_data = {
+            "type": "offer",
+            "title": engagement.get("title_en", ""),
+            "description": engagement.get("description_en", ""),
+            "start_date": engagement.get("start_date", ""),
+            "end_date": engagement.get("end_date", ""),
+            "terms": engagement.get("terms_conditions_en", ""),
+            "is_exclusive": bool(engagement.get("is_exclusive", 0)),
+            "mall_id": engagement.get("unique_property_id")
+        }
+        knowledge_graph.add_node(f"engagement_{engagement['engagement_id']}", **node_data)
         if engagement["brand_id"]:
             knowledge_graph.add_edge(f"brand_{engagement['brand_id']}", f"engagement_{engagement['engagement_id']}")
 
@@ -317,29 +372,81 @@ async def refine_context(state: CustomerState) -> CustomerState:
         "amenities": [],
         "mall_name": "",
     }
+    
+    # Get mall name
     mall = await db_fetch_one_async("SELECT marketing_name AS name_en FROM malls WHERE unique_property_id = $1", (state.mall_id,))
     context["mall_name"] = mall["name_en"] if mall else "Unknown Mall"
 
-    # Fetch offers explicitly for offer_info intent
-    if state.intent.startswith("offer_"):
-        engagements = await db_fetch_all_async(
-            "SELECT e.engagement_id, e.description_en, e.brand_id, e.start_date, e.end_date "
-            "FROM engagements e "
-            "WHERE e.unique_property_id = $1 AND e.type = 'offer'",
+    # For store queries, make sure to fetch ALL stores for a given mall
+    if state.intent.startswith("store_"):
+        store_name = state.context_data.get("resolved_entity", "").lower()
+        
+        # Fetch all stores for this mall directly from database for accuracy
+        all_stores = await db_fetch_all_async(
+            """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
+               b.store_phone_number, b.store_email, b.store_website, b.pms_unit_codes
+               FROM brands b 
+               JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+               WHERE bma.unique_property_id = $1""", 
             (state.mall_id,)
         )
-        for engagement in engagements:
-            brand = await db_fetch_one_async(
-                "SELECT brand_name_en FROM brands WHERE brand_id = $1",
-                (engagement["brand_id"],)
+        
+        for store in all_stores:
+            store_data = {
+                "name": store["brand_name_en"],
+                "category": store.get("category_name", ""),
+                "store_id": store["brand_id"],
+                "description": store.get("description_en", ""),
+                "phone": store.get("store_phone_number", ""),
+                "email": store.get("store_email", ""),
+                "website": store.get("store_website", ""),
+                "location": store.get("pms_unit_codes", {})
+            }
+            
+            # If this is the store being searched for, put it at the top
+            if store_name and store_name in store["brand_name_en"].lower():
+                context["stores"].insert(0, store_data)
+            else:
+                context["stores"].append(store_data)
+    
+    # Fetch product details including price
+    if state.intent.startswith("product_"):
+        product_name = state.context_data.get("resolved_entity", "").lower()
+        
+        # Search for products either by name or for a specific store
+        if product_name:
+            products = await db_fetch_all_async(
+                """SELECT p.id, p.name, p.description, p.price, p.category, p.brand_id, 
+                   p.is_featured, p.in_stock, b.brand_name_en
+                   FROM products p
+                   JOIN brands b ON p.brand_id = b.brand_id
+                   JOIN brand_mall_association bma ON b.brand_id = bma.brand_id
+                   WHERE bma.unique_property_id = $1 AND 
+                   (LOWER(p.name) LIKE $2 OR LOWER(b.brand_name_en) LIKE $2)""",
+                (state.mall_id, f"%{product_name}%")
             )
-            context["offers"].append({
-                "id": engagement["engagement_id"],
-                "description": engagement["description_en"],
-                "brand_id": engagement["brand_id"],
-                "store_name": brand["brand_name_en"] if brand else "Unknown Store",
-                "start_date": engagement["start_date"],
-                "end_date": engagement["end_date"],
+        else:
+            products = await db_fetch_all_async(
+                """SELECT p.id, p.name, p.description, p.price, p.category, p.brand_id, 
+                   p.is_featured, p.in_stock, b.brand_name_en
+                   FROM products p
+                   JOIN brands b ON p.brand_id = b.brand_id
+                   JOIN brand_mall_association bma ON b.brand_id = bma.brand_id
+                   WHERE bma.unique_property_id = $1 
+                   LIMIT 20""",
+                (state.mall_id,)
+            )
+        
+        for product in products:
+            context["products"].append({
+                "id": product["id"],
+                "name": product["name"],
+                "description": product.get("description", ""),
+                "price": float(product["price"]) if product.get("price") is not None else None,
+                "brand_id": product["brand_id"],
+                "category": product.get("category", ""),
+                "store_name": product.get("brand_name_en", ""),
+                "in_stock": product.get("in_stock", True)
             })
 
     # Process Pinecone results
@@ -350,7 +457,8 @@ async def refine_context(state: CustomerState) -> CustomerState:
             continue
         
         doc_type = metadata.get("type")
-        if doc_type == "store":
+        if doc_type == "store" and not state.intent.startswith("store_"):
+            # Only add store from vector search if not already doing a direct store query
             store = {
                 "name": metadata.get("name_en"),
                 "category": metadata.get("category_en"),
@@ -384,7 +492,8 @@ async def refine_context(state: CustomerState) -> CustomerState:
                     "description": metadata.get("description_en"),
                 })
                 
-        elif doc_type == "product":
+        elif doc_type == "product" and not state.intent.startswith("product_"):
+            # Only add product from vector search if not already doing a direct product query
             product = {
                 "id": metadata.get("id"),
                 "name": metadata.get("name"),
@@ -401,10 +510,12 @@ async def refine_context(state: CustomerState) -> CustomerState:
                 "name": metadata.get("name"),
             })
 
-    # Fetch additional brand details
+    # Fetch additional brand details for offers and products
     if brand_ids:
         brands = await db_fetch_all_async(
-            "SELECT brand_id, brand_name_en, category_name FROM brands WHERE brand_id = ANY($1)",
+            """SELECT brand_id, brand_name_en, category_name, description_en, 
+               store_phone_number, store_email, store_website, pms_unit_codes 
+               FROM brands WHERE brand_id = ANY($1)""",
             (list(brand_ids),)
         )
         brand_map = {b["brand_id"]: b for b in brands}
@@ -415,6 +526,32 @@ async def refine_context(state: CustomerState) -> CustomerState:
                 item["store_name"] = brand["brand_name_en"]
                 if "category" not in item and brand["category_name"]:
                     item["category"] = brand["category_name"]
+                if "location" not in item and brand.get("pms_unit_codes"):
+                    item["location"] = brand["pms_unit_codes"]
+
+    # If no stores found but resolved entity exists, try a direct DB lookup
+    if not context["stores"] and state.context_data.get("resolved_entity"):
+        store_name = state.context_data["resolved_entity"].lower()
+        stores = await db_fetch_all_async(
+            """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
+               b.store_phone_number, b.store_email, b.store_website, b.pms_unit_codes
+               FROM brands b 
+               JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+               WHERE bma.unique_property_id = $1 AND LOWER(b.brand_name_en) LIKE $2""", 
+            (state.mall_id, f"%{store_name}%")
+        )
+        
+        for store in stores:
+            context["stores"].append({
+                "name": store["brand_name_en"],
+                "category": store.get("category_name", ""),
+                "store_id": store["brand_id"],
+                "description": store.get("description_en", ""),
+                "phone": store.get("store_phone_number", ""),
+                "email": store.get("store_email", ""),
+                "website": store.get("store_website", ""),
+                "location": store.get("pms_unit_codes", {})
+            })
 
     state.context_data = context
     state.response = json.dumps(convert_to_json_safe(context))
