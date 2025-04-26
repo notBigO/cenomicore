@@ -177,83 +177,274 @@ async def retrieve_store_context(state: CustomerState) -> CustomerState:
     if not state.mall_id:
         state.response = "Please select a mall first!"
         return state
-    store_name = state.collected_data.get("name", "").lower()
-    query = """
-        SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, b.pms_unit_codes
-        FROM brands b 
-        JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
-        WHERE bma.unique_property_id = $1
-    """
-    params = [state.mall_id]
-    if store_name:
-        query += " AND LOWER(b.brand_name_en) LIKE $2"
-        params.append(f"%{store_name}%")
-    stores = await db_fetch_all_async(query, tuple(params))
-    state.context_data = {"stores": [dict(store) for store in stores[:5]]}  # Limit to 5
+    
+    # Vector search if we have a name
+    stores = []
+    if state.collected_data and "name" in state.collected_data:
+        store_name = state.collected_data.get("name", "").lower()
+        if store_name:
+            # Vector search in Pinecone
+            try:
+                query_embedding = embeddings.embed_query(store_name)
+                vector_results = index.query(
+                    vector=query_embedding,
+                    filter={"type": "store", "mall_id": str(state.mall_id)},
+                    top_k=5,
+                    include_metadata=True
+                )
+                
+                # Extract brand_ids from vector results
+                brand_ids = []
+                for match in vector_results.matches:
+                    if match.score > 0.7:  # Similarity threshold
+                        metadata = match.metadata
+                        if "brand_id" in metadata:
+                            brand_ids.append(metadata["brand_id"])
+                
+                # If we found any good matches, query the database with these IDs
+                if brand_ids:
+                    brand_id_list = ",".join([str(id) for id in brand_ids])
+                    vector_db_query = f"""
+                        SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, b.pms_unit_codes
+                        FROM brands b 
+                        JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+                        WHERE bma.unique_property_id = $1 AND b.brand_id IN ({brand_id_list})
+                    """
+                    vector_stores = await db_fetch_all_async(vector_db_query, (state.mall_id,))
+                    stores.extend([dict(store) for store in vector_stores])
+                    logger.info(f"Vector search found {len(vector_stores)} stores for '{store_name}'")
+            except Exception as e:
+                logger.error(f"Error in vector search for stores: {str(e)}")
+    
+    # Traditional database search as fallback or additional results
+    if not stores and state.collected_data:
+        store_name = state.collected_data.get("name", "").lower() if state.collected_data else ""
+        query = """
+            SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, b.pms_unit_codes
+            FROM brands b 
+            JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+            WHERE bma.unique_property_id = $1
+        """
+        params = [state.mall_id]
+        if store_name:
+            query += " AND LOWER(b.brand_name_en) LIKE $2"
+            params.append(f"%{store_name}%")
+        db_stores = await db_fetch_all_async(query, tuple(params))
+        stores.extend([dict(store) for store in db_stores if not any(s["brand_id"] == store["brand_id"] for s in stores)])
+    
+    # Limit to top 5 stores
+    state.context_data = {"stores": stores[:5]}
     return state
 
 async def retrieve_product_context(state: CustomerState) -> CustomerState:
     if not state.mall_id:
         state.response = "Please select a mall first!"
         return state
-    product_name = state.collected_data.get("name", "").lower()
-    product_category = state.collected_data.get("category", "").lower()
-    query = """
-        SELECT p.id, p.name, p.description, p.price, p.category, p.brand_id, p.in_stock, 
-               b.brand_name_en, b.pms_unit_codes
-        FROM products p
-        JOIN brands b ON p.brand_id = b.brand_id
-        JOIN brand_mall_association bma ON b.brand_id = bma.brand_id
-        WHERE bma.unique_property_id = $1
-    """
-    params = [state.mall_id]
-    if product_name and product_category:
-        query += " AND (LOWER(p.name) LIKE $2 OR LOWER(p.category) = $3)"
-        params.extend([f"%{product_name}%", product_category])
-    elif product_name:
-        query += " AND LOWER(p.name) LIKE $2"
-        params.append(f"%{product_name}%")
-    elif product_category:
-        query += " AND LOWER(p.category) = $2"
-        params.append(product_category)
-    products = await db_fetch_all_async(query, tuple(params))
-    state.context_data = {"products": [dict(product) for product in products[:5]]}  # Limit to 5
-    logger.info(f"Retrieved {len(products)} products for query: {state.query}")
+    
+    # Vector search first
+    products = []
+    if state.collected_data:
+        product_name = state.collected_data.get("name", "").lower() if state.collected_data else ""
+        product_category = state.collected_data.get("category", "").lower() if state.collected_data else ""
+        
+        search_text = product_name
+        if product_category and not product_name:
+            search_text = product_category
+        elif product_category and product_name:
+            search_text = f"{product_name} {product_category}"
+            
+        if search_text:
+            try:
+                query_embedding = embeddings.embed_query(search_text)
+                vector_results = index.query(
+                    vector=query_embedding,
+                    filter={"type": "product", "mall_id": str(state.mall_id)},
+                    top_k=5,
+                    include_metadata=True
+                )
+                
+                # Extract product IDs from vector results
+                product_ids = []
+                for match in vector_results.matches:
+                    if match.score > 0.65:  # Similarity threshold
+                        metadata = match.metadata
+                        if "id" in metadata:
+                            product_ids.append(metadata["id"])
+                
+                # If we found good matches, query the database with these IDs
+                if product_ids:
+                    product_id_list = ",".join([str(id) for id in product_ids])
+                    vector_db_query = f"""
+                        SELECT p.id, p.name, p.description, p.price, p.category, p.brand_id, p.in_stock, 
+                              b.brand_name_en, b.pms_unit_codes
+                        FROM products p
+                        JOIN brands b ON p.brand_id = b.brand_id
+                        JOIN brand_mall_association bma ON b.brand_id = bma.brand_id
+                        WHERE bma.unique_property_id = $1 AND p.id IN ({product_id_list})
+                    """
+                    vector_products = await db_fetch_all_async(vector_db_query, (state.mall_id,))
+                    products.extend([dict(product) for product in vector_products])
+                    logger.info(f"Vector search found {len(vector_products)} products for '{search_text}'")
+            except Exception as e:
+                logger.error(f"Error in vector search for products: {str(e)}")
+    
+    # Traditional database search as fallback or for additional results
+    if not products and state.collected_data:
+        product_name = state.collected_data.get("name", "").lower() if state.collected_data else ""
+        product_category = state.collected_data.get("category", "").lower() if state.collected_data else ""
+        
+        query = """
+            SELECT p.id, p.name, p.description, p.price, p.category, p.brand_id, p.in_stock, 
+                  b.brand_name_en, b.pms_unit_codes
+            FROM products p
+            JOIN brands b ON p.brand_id = b.brand_id
+            JOIN brand_mall_association bma ON b.brand_id = bma.brand_id
+            WHERE bma.unique_property_id = $1
+        """
+        params = [state.mall_id]
+        if product_name and product_category:
+            query += " AND (LOWER(p.name) LIKE $2 OR LOWER(p.category) = $3)"
+            params.extend([f"%{product_name}%", product_category])
+        elif product_name:
+            query += " AND LOWER(p.name) LIKE $2"
+            params.append(f"%{product_name}%")
+        elif product_category:
+            query += " AND LOWER(p.category) = $2"
+            params.append(product_category)
+        
+        db_products = await db_fetch_all_async(query, tuple(params))
+        products.extend([dict(product) for product in db_products if not any(p["id"] == product["id"] for p in products)])
+    
+    state.context_data = {"products": products[:5]}  # Limit to 5
+    if not products:
+        logger.info(f"No products found for query: {state.query}")
+    else:
+        logger.info(f"Retrieved {len(products)} products for query: {state.query}")
     return state
 
 async def retrieve_offer_context(state: CustomerState) -> CustomerState:
     if not state.mall_id:
         state.response = "Please select a mall first!"
         return state
-    offers = await db_fetch_all_async(
-        """SELECT e.engagement_id, e.title_en, e.description_en, e.start_date, e.end_date, 
-                  b.brand_name_en
-           FROM engagements e
-           LEFT JOIN brands b ON e.brand_id = b.brand_id
-           WHERE e.unique_property_id = $1 AND LOWER(e.type) = 'offer'""",
-        (state.mall_id,)
-    )
-    state.context_data = {"offers": [dict(offer) for offer in offers[:5]]}  # Limit to 5
+    
+    # Vector search for offers
+    offers = []
+    search_text = ""
+    if state.collected_data:
+        offer_name = state.collected_data.get("name", "").lower() if state.collected_data else ""
+        if offer_name:
+            search_text = offer_name
+            try:
+                query_embedding = embeddings.embed_query(search_text)
+                vector_results = index.query(
+                    vector=query_embedding,
+                    filter={"type": "engagement", "mall_id": str(state.mall_id)},
+                    top_k=5,
+                    include_metadata=True
+                )
+                
+                # Extract engagement IDs from vector results
+                engagement_ids = []
+                for match in vector_results.matches:
+                    if match.score > 0.7:  # Similarity threshold
+                        metadata = match.metadata
+                        if "engagement_id" in metadata and metadata.get("type") == "offer":
+                            engagement_ids.append(metadata["engagement_id"])
+                
+                # If we found good matches, query the database with these IDs
+                if engagement_ids:
+                    engagement_id_list = ",".join([str(id) for id in engagement_ids])
+                    vector_db_query = f"""
+                        SELECT e.engagement_id, e.title_en, e.description_en, e.start_date, e.end_date, 
+                              b.brand_name_en
+                        FROM engagements e
+                        LEFT JOIN brands b ON e.brand_id = b.brand_id
+                        WHERE e.unique_property_id = $1 AND LOWER(e.type) = 'offer' 
+                        AND e.engagement_id IN ({engagement_id_list})
+                    """
+                    vector_offers = await db_fetch_all_async(vector_db_query, (state.mall_id,))
+                    offers.extend([dict(offer) for offer in vector_offers])
+                    logger.info(f"Vector search found {len(vector_offers)} offers for '{search_text}'")
+            except Exception as e:
+                logger.error(f"Error in vector search for offers: {str(e)}")
+    
+    # Traditional database search for offers as fallback or additional results
+    if not offers or not search_text:
+        db_offers = await db_fetch_all_async(
+            """SELECT e.engagement_id, e.title_en, e.description_en, e.start_date, e.end_date, 
+                     b.brand_name_en
+              FROM engagements e
+              LEFT JOIN brands b ON e.brand_id = b.brand_id
+              WHERE e.unique_property_id = $1 AND LOWER(e.type) = 'offer'""",
+            (state.mall_id,)
+        )
+        offers.extend([dict(offer) for offer in db_offers if not any(o["engagement_id"] == offer["engagement_id"] for o in offers)])
+    
+    state.context_data = {"offers": offers[:5]}  # Limit to 5
     return state
 
 async def retrieve_event_context(state: CustomerState) -> CustomerState:
     if not state.mall_id:
         state.response = "Please select a mall first!"
         return state
-    event_name = state.collected_data.get("name", "").lower()
-    query = """
-        SELECT e.engagement_id, e.title_en, e.description_en, e.start_date, e.end_date, 
-               b.brand_name_en
-        FROM engagements e
-        LEFT JOIN brands b ON e.brand_id = b.brand_id
-        WHERE e.unique_property_id = $1 AND LOWER(e.type) = 'event'
-    """
-    params = [state.mall_id]
-    if event_name:
-        query += " AND LOWER(e.title_en) LIKE $2"
-        params.append(f"%{event_name}%")
-    events = await db_fetch_all_async(query, tuple(params))
-    state.context_data = {"events": [dict(event) for event in events[:5]]}  # Limit to 5
+    
+    # Vector search for events
+    events = []
+    if state.collected_data:
+        event_name = state.collected_data.get("name", "").lower() if state.collected_data else ""
+        if event_name:
+            try:
+                query_embedding = embeddings.embed_query(event_name)
+                vector_results = index.query(
+                    vector=query_embedding,
+                    filter={"type": "engagement", "mall_id": str(state.mall_id)},
+                    top_k=5,
+                    include_metadata=True
+                )
+                
+                # Extract engagement IDs from vector results
+                engagement_ids = []
+                for match in vector_results.matches:
+                    if match.score > 0.7:  # Similarity threshold
+                        metadata = match.metadata
+                        if "engagement_id" in metadata and metadata.get("type") == "event":
+                            engagement_ids.append(metadata["engagement_id"])
+                
+                # If we found good matches, query the database with these IDs
+                if engagement_ids:
+                    engagement_id_list = ",".join([str(id) for id in engagement_ids])
+                    vector_db_query = f"""
+                        SELECT e.engagement_id, e.title_en, e.description_en, e.start_date, e.end_date, 
+                              b.brand_name_en
+                        FROM engagements e
+                        LEFT JOIN brands b ON e.brand_id = b.brand_id
+                        WHERE e.unique_property_id = $1 AND LOWER(e.type) = 'event' 
+                        AND e.engagement_id IN ({engagement_id_list})
+                    """
+                    vector_events = await db_fetch_all_async(vector_db_query, (state.mall_id,))
+                    events.extend([dict(event) for event in vector_events])
+                    logger.info(f"Vector search found {len(vector_events)} events for '{event_name}'")
+            except Exception as e:
+                logger.error(f"Error in vector search for events: {str(e)}")
+    
+    # Traditional database search for events as fallback or for additional results
+    if not events and state.collected_data:
+        event_name = state.collected_data.get("name", "").lower() if state.collected_data else ""
+        query = """
+            SELECT e.engagement_id, e.title_en, e.description_en, e.start_date, e.end_date, 
+                  b.brand_name_en
+            FROM engagements e
+            LEFT JOIN brands b ON e.brand_id = b.brand_id
+            WHERE e.unique_property_id = $1 AND LOWER(e.type) = 'event'
+        """
+        params = [state.mall_id]
+        if event_name:
+            query += " AND LOWER(e.title_en) LIKE $2"
+            params.append(f"%{event_name}%")
+        db_events = await db_fetch_all_async(query, tuple(params))
+        events.extend([dict(event) for event in db_events if not any(e["engagement_id"] == event["engagement_id"] for e in events)])
+    
+    state.context_data = {"events": events[:5]}  # Limit to 5
     return state
 
 # Response Generation Prompts
@@ -425,3 +616,56 @@ customer_workflow.add_edge("generate_event_response", END)
 customer_workflow.add_edge("generate_general_response", END)
 
 customer_graph = customer_workflow.compile()
+
+# Add a new semantic search function
+async def semantic_search(query_text, search_type=None, mall_id=None, top_k=5, threshold=0.7):
+    """
+    Perform semantic search across the vector database
+    
+    Args:
+        query_text (str): The search query
+        search_type (str, optional): The type of entity to search for (store, product, event, offer)
+        mall_id (int, optional): The mall ID to filter results
+        top_k (int): Number of results to return
+        threshold (float): Similarity threshold (0-1)
+        
+    Returns:
+        list: List of matching items with their metadata
+    """
+    try:
+        if not query_text:
+            return []
+            
+        query_embedding = embeddings.embed_query(query_text)
+        filter_dict = {}
+        
+        if search_type:
+            # Handle different entity types
+            if search_type == "offer" or search_type == "event":
+                filter_dict["type"] = "engagement"
+            else:
+                filter_dict["type"] = search_type
+                
+        if mall_id:
+            filter_dict["mall_id"] = str(mall_id)
+            
+        vector_results = index.query(
+            vector=query_embedding,
+            filter=filter_dict,
+            top_k=top_k,
+            include_metadata=True
+        )
+        
+        results = []
+        for match in vector_results.matches:
+            if match.score > threshold:
+                results.append({
+                    "id": match.id,
+                    "score": match.score,
+                    "metadata": match.metadata
+                })
+                
+        return results
+    except Exception as e:
+        logger.error(f"Error in semantic search: {str(e)}")
+        return []
