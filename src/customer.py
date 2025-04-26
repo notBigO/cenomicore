@@ -120,41 +120,51 @@ async def populate_knowledge_graph():
         if engagement["brand_id"]:
             knowledge_graph.add_edge(f"brand_{engagement['brand_id']}", f"engagement_{engagement['engagement_id']}")
 
-# Intent Classification Prompt
-# intent_classification_prompt = PromptTemplate(
-#     input_variables=["query", "conversation_history"],
-#     template="""
-#     You are CenomiAI, a mall assistant. Parse this query to determine the user's intent based on the query and conversation history.
+# Add the new prompt for customer query classification
+customer_query_classification_prompt = PromptTemplate(
+    input_variables=["query", "conversation_history"],
+    template="""
+    You are CenomiAI, a mall assistant. Parse this query to determine the high-level category of the user's question based on the query and conversation history.
 
-#     Valid entities: store, offer, product, event, service, amenity, loyalty
-#     Valid actions: info, navigate, recommend, list, balance, programs
+    Query: "{query}"
 
-#     Query: "{query}"
+    Previous conversation:
+    {conversation_history}
 
-#     Previous conversation:
-#     {conversation_history}
+    Instructions:
+    - Use the conversation history to resolve vague terms like "it", "that", or "the store" to specific entities mentioned earlier.
+    - If the query is a follow-up (e.g., "Where is it?"), link it to the most recent entity from history.
+    - For queries about food, dining, or restaurants, classify as product_info_query with a focus on food.
+    - For queries about planning a visit to the mall with family/kids, classify as family_planning_query.
+    - For navigation questions ("how do I get to X"), classify based on the destination (store, service, etc.)
 
-#     Instructions:
-#     - Use the conversation history to resolve vague terms like "it", "that", or "the store" to specific entities mentioned earlier.
-#     - If the query is a follow-up (e.g., "Where is it?"), link it to the most recent entity from history.
-#     - For broad queries (e.g., "What's good here?"), assume 'recommend' or 'list' based on context.
-#     - For loyalty-related queries, identify if the user is asking about their points balance or the programs they are enrolled in.
-#     - Extract specific details (e.g., store name) into collected_data.
-#     - Identify if there's a specific type preference mentioned (e.g., "Italian" food, "sports" shoes, "luxury" brands) and add to type_preference.
+    Return ONLY ONE of these query types (no JSON, just the exact string):
+    - product_info_query: When asking about products, stores, brands, restaurants or specific items
+    - mall_info_query: When asking about the mall itself (location, timings, facilities, directions)
+    - offer_or_event_info_query: When asking about offers, events, sales, promotions, or discounts
+    - services_info_query: When asking about available services (parking, wheelchair access, restrooms, etc.)
+    - family_planning_query: When asking about child-friendly activities, family itineraries, or visit planning
+    - visit_planning_query: When asking for suggestions about what to do in the mall or creating an itinerary
+    - fallback_query: When the query doesn't clearly fit any of the above categories
 
-#     Return a JSON object with:
-#     - entity_type: What they're asking about (store, offer, product, etc., or loyalty)
-#     - action: What they want (info, navigate, recommend, list, balance, programs)
-#     - collected_data: Any details provided (e.g., "name": "Tiffany & Co.")
-#     - type_preference: Any specific type/category mentioned (e.g., "Italian", "sports", "casual", "luxury")
+    Examples:
+    "What time does the mall close?" → mall_info_query
+    "Are there any discounts this week?" → offer_or_event_info_query
+    "Where can I find Nike shoes?" → product_info_query
+    "Is wheelchair service available?" → services_info_query
+    "I want to get something nice for my wife" → product_info_query
+    "What restaurants are there?" → product_info_query
+    "Is there a sale at Zara?" → offer_or_event_info_query
+    "Where is the nearest restroom?" → services_info_query
+    "I'm coming with my kids tomorrow, what should we do?" → family_planning_query
+    "What's good for a 2-hour visit?" → visit_planning_query
+    "I want to eat today" → product_info_query
+    "My kids are with me" → family_planning_query
+    """
+)
+customer_query_classification_chain = customer_query_classification_prompt | llm | StrOutputParser()
 
-#     Example outputs:
-#     ```json
-#     {{"entity_type": "product", "action": "info", "collected_data": {{"name": "wedding ring"}}, "type_preference": "luxury"}}
-#     {{"entity_type": "store", "action": "recommend", "collected_data": {{}}, "type_preference": "dining"}}
-#     {{"entity_type": "loyalty", "action": "balance", "collected_data": {{}}, "type_preference": null}}
-#     """
-# )
+# Existing intent classification prompt - No changes needed
 intent_classification_prompt = PromptTemplate(
     input_variables=["query", "conversation_history"],
     template="""
@@ -171,12 +181,12 @@ intent_classification_prompt = PromptTemplate(
     Instructions:
     - Use the conversation history to resolve vague terms like "it", "that", or "the store" to specific entities mentioned earlier.
     - If the query is a follow-up (e.g., "Where is it?"), link it to the most recent entity from history.
-    - For broad queries (e.g., "What’s good here?"), assume 'recommend' or 'list' based on context.
+    - For broad queries (e.g., "What's good here?"), assume 'recommend' or 'list' based on context.
     - For loyalty-related queries, identify if the user is asking about their points balance or the programs they are enrolled in.
     - Extract specific details (e.g., store name) into collected_data.
 
     Return a JSON object with:
-    - entity_type: What they’re asking about (store, offer, product, etc., or loyalty)
+    - entity_type: What they're asking about (store, offer, product, etc., or loyalty)
     - action: What they want (info, navigate, recommend, list, balance, programs)
     - collected_data: Any details provided (e.g., "name": "Tiffany & Co.")
 
@@ -190,199 +200,69 @@ intent_classification_prompt = PromptTemplate(
 intent_chain = intent_classification_prompt | llm | StrOutputParser()
 
 # Updated Customer Response Prompt
-# customer_prompt = PromptTemplate(
-#     input_variables=["context", "query", "lang", "conversation_history", "mall_name", "resolved_entity", "type_preference", "needs_type_follow_up"],
-#     template="""
-#     You are CenomiAI, a professional and knowledgeable assistant for {mall_name} mall.
-    
-#     # Core Identity
-#     - Respond in {lang} with a concise, professional tone
-#     - Use emojis 😊 sparingly to keep interactions engaging
-#     - Provide accurate, precise information about {mall_name} mall
-    
-#     # Context Awareness
-#     - Maintain continuity based on: {conversation_history}
-#     - Use resolved entity "{resolved_entity}" as the subject unless contradicted
-#     - Connect to previously mentioned entities without explicitly stating "since we were talking about X"
-#     - For follow-up questions, build on previous exchanges without restating context
-    
-#     # Type Preference Framework
-#     - Type preference: "{type_preference}" - When provided, filter results to match this preference
-#     - Needs follow-up for type: {needs_type_follow_up}
-#     - For queries about food/dining: If no type preference, show general options and ask about cuisine preferences (Italian, Indian, Fast food, etc.)
-#     - For queries about products: If no type preference, show general options and ask about specific types (Sports shoes, Formal shoes, etc.)
-#     - For queries about stores: If no type preference, show general options and ask about specific categories they're interested in
-    
-#     # Follow-up Structure
-#     - When no type preference AND needs_type_follow_up is true:
-#       1. List the relevant stores/products/services first
-#       2. End with "Do you have a preference for any specific type of [product/cuisine/service]?" to guide the conversation
-#     - When type preference IS provided:
-#       1. Show only the items matching that preference
-#       2. End with a friendly note like "Enjoy your meal!" for food or "Hope you find the perfect pair!" for shoes
-    
-#     # Response Guidelines
-    
-#     ## Store Information
-#     - Format location codes properly: 
-#       * "FF" = "First Floor" (e.g., FF08 becomes "First Floor, Shop #08")
-#       * "GF" = "Ground Floor" (e.g., GF12 becomes "Ground Floor, Shop #12") 
-#       * "BSW" = "Basement West" (e.g., BSW001 becomes "Basement West, Shop #001")
-#     - Show only 3-5 location codes maximum and mention "and additional locations" if there are more
-#     - Include category and description of store offerings
-#     - For neighboring stores, highlight those with adjacent shop numbers on the same floor
-    
-#     ## Product Queries
-#     - Include price, availability, features, and formatted store location
-#     - Structure as clear, numbered lists for multiple items
-    
-#     ## Offers & Events
-#     - Include specific details (discount amounts, conditions, dates) for both offers and events
-#     - If a specific store is mentioned, list its offers/events directly without saying "Since we were talking about X..."
-    
-#     ## Navigation Assistance
-#     - Provide clear, step-by-step directions using proper floor names (not codes)
-#     - Reference landmarks and nearby stores as navigation points
-    
-#     # Special Handling Instructions
-#     - Keep responses concise and to the point
-#     - Format location codes in human-readable form (e.g., "First Floor, Shop #12" instead of "FF12")
-#     - Avoid overwhelming users with too many location codes at once
-#     - When asked about neighboring stores, identify those with similar location codes
-#     - For services and amenities, provide complete details including location and description
-#     - Avoid self-reassuring phrases like "Since we were talking about Zara..." - instead, directly address the question
-    
-#     # Contextual Information Processing
-    
-#     Carefully analyze the provided context about {mall_name}:
-#     {context}
-    
-#     Review the conversation history to maintain continuity without explicitly mentioning it:
-#     {conversation_history}
-    
-#     Now respond to the current query with concise, professional information:
-#     "{query}"
-#     """
-# )
-# customer_prompt = PromptTemplate(
-#     input_variables=["context", "query", "lang", "conversation_history", "mall_name", "resolved_entity"],
-#     template="""
-#     You are CenomiAI, a friendly, proactive, and highly knowledgeable assistant for {mall_name} mall. 
-    
-#     # Core Identity
-#     - Respond in {lang} with a warm, conversational tone
-#     - Use appropriate emojis 😊 to keep interaction engaging without overusing them
-#     - Your purpose is to be the definitive source of information about {mall_name} mall
-    
-#     # Context Awareness
-#     - Always reference the most recent conversation history to maintain continuity: {conversation_history}
-#     - If a resolved entity is provided (e.g., "{resolved_entity}"), treat it as the subject of the query unless contradicted
-#     - When users refer to something previously mentioned ("it", "that store", "those products"), connect back to the resolved entity or specific items from earlier in the conversation
-#     - If the user asks follow-up questions, ensure your answers build on previous exchanges rather than starting fresh
-#     - For multi-part questions, address each component thoroughly
-    
-#     # Response Guidelines
-
-#     - Keep the response concise and to the point. Preferably within 1 line.
-    
-#     ## Store Information
-#     - Provide specific details: location (floor, section), operating hours.
-#     - Include relevant category and description of what the store offers
-#     - If the user asks about a store not mentioned in context, acknowledge this and suggest similar stores in {mall_name} 
-#     - Do not give out any sort of contact information for stores. 
-    
-    
-#     ## Product Queries (including shopping lists)
-#     - For the product requested, match to specific stores that have the product in {mall_name}.
-#     - Include product details: price, offers, availability, features and store location
-#     - Structure as a clear, numbered list when responding to multiple items
-    
-#     ## Dining Recommendations
-#     - Suggest restaurants based on cuisine type, price range, dietary requirements, or ambiance
-#     - Include location details, specialty dishes, and current promotions
-#     - For families, highlight kid-friendly options and special menus
-#     - Mention seating availability (food court vs. sit-down restaurant)
-    
-#     ## Offers & Events
-#     - Highlight current promotions with specific details (discount amounts, conditions, end dates)
-#     - Connect offers to user's interests based on conversation history
-#     - For events, include dates, times, locations, and any registration requirements
-#     - Personalize recommendations based on previous interactions
-#     - If a specific store is mentioned or implied (e.g., "they"), list its offers.
-#     - If no offers exist for that store, say so gracefully and suggest offers from similar stores by category (e.g., fashion, electronics).
-    
-    
-#     ## Vague/Open-Ended Queries
-#     - For broad requests ("What's good here?", "I'm so bored", "I'm so hungry"), propose a structured plan with multiple options
-#     - Segment recommendations by categories (shopping, dining, entertainment)
-#     - Ground suggestions in user's previous interests if available from conversation history
-#     - Present a clear, actionable itinerary that covers different areas of the mall
-    
-#     ## Personalization
-#     - Remember and reference previous interactions within the same session
-    
-#     # Special Handling Instructions
-    
-#     - Ask one follow up question at the end of your response if the type of product is not clear, or if the cuisine for dining is not clear or if the type of event is not clear for the same query type else end your response with a nice note.
-#     - If information is not available in context, clearly state this and provide the most relevant alternative from {mall_name}
-#     - Maintain consistent personality throughout the conversation, building rapport over multiple exchanges
-    
-#     # Contextual Information Processing
-    
-#     Carefully analyze the provided context about {mall_name}:
-#     {context}
-    
-#     Review the full conversation history to maintain continuity:
-#     {conversation_history}
-    
-#     Now respond to the current query with complete, helpful information:
-#     "{query}"
-#     """
-# )
 customer_prompt = PromptTemplate(
-    input_variables=["context", "query", "lang", "conversation_history", "mall_name", "resolved_entity"],
+    input_variables=["context", "query", "lang", "conversation_history", "mall_name", "resolved_entity", "topic_turn_count", "conversation_topic"],
     template="""
-    You are CenomiAI — the friendly, helpful, and super knowledgeable assistant at {mall_name} mall. 😊
+    You are CenomiAI — a mall assistant at {mall_name}, designed to help shoppers find information, plan visits, and discover stores, offers, and events.
 
-    # Your Style
-    - Speak in {lang}, always with a natural, warm, and casual tone.
-    - Keep replies short and easy to read — ideally one sentence, two max.
-    - Avoid lists or bullet points. Just chat like a friendly local.
-    - Don’t over-explain. Give just enough, and let the user ask if they want more.
-    - A light emoji here and there is fine, but don’t overdo it.
+    # Response Style
+    - Be concise and conversational, like a helpful friend who knows the mall well
+    - Keep responses focused on one main point with 1-3 short sentences
+    - Use precise details when available (store locations, hours, prices)
+    - Always provide locations in clear terms (Floor, section, nearby landmarks)
+    - End each response with a relevant follow-up suggestion related to the user's query
 
-    # Stay in the Flow
-    - Pay close attention to how the conversation has been going: {conversation_history}
-    - If there’s a resolved entity like "{resolved_entity}", make that your main focus — unless it’s clear the user switched topics.
-    - If the user refers to something vaguely (“that place”, “those items”), connect it to past context.
-    - Keep things moving naturally. Don’t repeat what’s already been said.
+    # Location Format Rules
+    - NEVER include raw location codes like "FF", "GF", "BSW" in your responses
+    - Always convert these codes to human-readable descriptions:
+      * "FF" → "First Floor"
+      * "GF" → "Ground Floor" 
+      * "BSW" → "Basement West"
+      * "F1" → "First Floor"
+      * "F2" → "Second Floor"
+      * "F3" → "Third Floor"
+    - Example: Instead of "FF08", say "First Floor, Shop #8"
+    - Example: Instead of "GF12", say "Ground Floor, Shop #12"
+    - If you see numbers after location codes, treat them as shop numbers
 
-    # How to Answer
-    - One-liner replies are best. If it needs more, keep it tight.
-    - Never give too much info at once — suggest the basics, and ask if they’d like more.
-    - Always offer to help further with a simple, friendly follow-up.
+    # Conversation Context
+    {conversation_history}
+    
+    # Conversation State
+    Current topic: {conversation_topic}
+    Turn count on this topic: {topic_turn_count}
+    
+    # Follow-up Suggestions
+    - For store queries: Suggest directions, similar stores, or current offers
+    - For product queries: Suggest filtering by price, brand, or viewing similar items
+    - For mall info: Suggest other useful information (parking, operating hours)
+    - For events/offers: Suggest filtering by category or time period
+    - For family visits: Suggest kid-friendly options or services
 
-    # You Can Talk About:
-    - Store details: what they do, where they are, when they’re open.
-    - Products: where to find them, price, deal, and if it's in stock.
-    - Food: type, vibe, must-try dishes, and location.
-    - Deals & events: what’s on, where, and till when.
-    - If the question’s vague, offer a couple of fun or useful ideas to spark interest.
+    # Information to Include
+    - Store details: Location (floor/section), category, and brief description
+    - Product info: Price, availability, store location
+    - Offers: Discount amount, conditions, validity period
+    - Events: Location, timing, any special instructions
+    - Services: Location, availability, requirements
 
-    # Small But Important
-    - Don’t make assumptions if info is missing. Just say what you know and gently ask if the user wants more.
-    - End on a friendly, upbeat note like “Want me to check more?” or “Hope that helps! 😊”
-
-    # The Process
-
-    Start by understanding everything you know about {mall_name}:
+    # Mall Database Information
     {context}
 
-    Then, think about how the chat has been going:
-    {conversation_history}
+    # Response Structure
+    1. Answer the user's question directly with specific details
+    2. Add one relevant piece of helpful context if available
+    3. If this is turn 1 or 2 on a topic: End with ONE natural follow-up option
+    4. If this is turn 3 or more: End with a closing message without follow-up questions, like "Enjoy your visit!" or "Hope that helps with your shopping!"
 
-    Now answer this question simply, clearly, and with a personal touch:
-    "{query}"
+    # Multi-turn Conversation Handling
+    - For family planning queries: If this is turn 2+, start building a cohesive plan based on previous responses
+    - For visit planning queries: If this is turn 2+, refine suggestions based on the user's preferences
+    - For product queries: If this is turn 2+, provide more specific recommendations
+
+    User Query: {query}
+    
+    Respond in {lang} in a friendly, conversational tone:
     """
 )
 
@@ -403,7 +283,28 @@ class CustomerState(PydanticBaseModel):
     direct_response: Optional[str] = None
     type_preference: Optional[str] = None  # Added field for type preference
     needs_type_follow_up: bool = False  # Added flag to indicate if we need to ask for type preference
+    query_type: Optional[str] = None  # Added field for high-level query classification
+    conversation_topic: Optional[str] = None  # Track current conversation topic
+    topic_turn_count: int = 0  # Track number of turns on current topic
 
+# Add the new node for high-level query classification
+async def classify_query_type(state: CustomerState) -> CustomerState:
+    formatted_history = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in state.conversation_history[-6:]]) if state.conversation_history else "No prior conversation."
+    query_type = await customer_query_classification_chain.ainvoke({"query": state.query, "conversation_history": formatted_history})
+    
+    # Strip any whitespace and ensure we have a valid query type
+    query_type = query_type.strip()
+    valid_query_types = ["product_info_query", "mall_info_query", "offer_or_event_info_query", "services_info_query", "family_planning_query", "visit_planning_query", "fallback_query"]
+    
+    if query_type not in valid_query_types:
+        logger.warning(f"Unexpected query_type result: '{query_type}', defaulting to fallback_query")
+        query_type = "fallback_query"
+    
+    state.query_type = query_type
+    logger.info(f"Classified query type: {state.query_type}")
+    return state
+
+# Update existing classify_intent function to use the high-level query type for context
 async def classify_intent(state: CustomerState) -> CustomerState:
     formatted_history = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in state.conversation_history[-6:]]) if state.conversation_history else "No prior conversation."
     intent_result = await intent_chain.ainvoke({"query": state.query, "conversation_history": formatted_history})
@@ -445,105 +346,752 @@ async def classify_intent(state: CustomerState) -> CustomerState:
     logger.info(f"Classified intent: {state.intent}, Resolved entity: {state.context_data.get('resolved_entity')}, Type preference: {state.type_preference}")
     return state
 
-async def initial_retrieval(state: CustomerState) -> CustomerState:
+# Create specialized context retrieval functions
+
+async def retrieve_product_context(state: CustomerState) -> CustomerState:
     if not state.mall_id:
         state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
         return state
 
-    cache_key = f"initial_context:{state.query}:{state.intent}:{state.user_id or 'anon'}:{state.mall_id}"
+    # Specialized query for products
+    cache_key = f"product_context:{state.query}:{state.intent}:{state.user_id or 'anon'}:{state.mall_id}"
     cached_context = REDIS_CLIENT.get(cache_key)
     if cached_context:
         state.initial_context = json.loads(cached_context)
         return state
 
+    # Extract product or store names from query using NLP
     query_items = [item.strip() for item in state.query.split("\n") if item.strip()] if "\n" in state.query else [state.query]
-    intent_prefixes = {
-        "store_info": "store",
-        "store_navigate": "store",
-        "store_recommend": "store",
-        "store_list": "store",
-        "product_info": "product",
-        "product_recommend": "product",
-        "product_list": "product",
-        "offer_info": "offer",
-        "offer_recommend": "offer",
-        "offer_list": "offer",
-        "event_info": "event",
-        "event_recommend": "event",
-        "event_list": "event",
-        "service_info": "service",
-        "service_recommend": "service",
-        "service_list": "service",
-        "amenity_info": "amenity",
-        "amenity_navigate": "amenity",
-        "amenity_list": "amenity",
-    }
-    entity_type = state.intent.split("_")[0]
-    query_prefix = intent_prefixes.get(state.intent, entity_type)
-
-    # Extract store name or category
-    store_name, category = None, None
-    all_brands = await db_fetch_all_async(
-        "SELECT b.brand_name_en, b.category_name FROM brands b JOIN brand_mall_association bma ON b.brand_id = bma.brand_id WHERE bma.unique_property_id = $1", 
-        (state.mall_id,)
-    )
-    store_names = [s["brand_name_en"].lower() for s in all_brands if s["brand_name_en"]]
-    categories = set(s["category_name"].lower() for s in all_brands if s["category_name"])
-    for item in query_items:
-        doc = nlp(item.lower())
+    product_name = state.context_data.get("resolved_entity", "").lower() if state.context_data else ""
+    
+    # If no specific product name, try to extract it from the query
+    if not product_name:
+        doc = nlp(" ".join(query_items).lower())
         for ent in doc.ents:
-            if ent.text in store_names:
-                store_name = ent.text
-                break
-        if not store_name:
-            for name in store_names:
-                if name in item.lower():
-                    store_name = name
-                    break
-        if not store_name:
-            for cat in categories:
-                if cat in item.lower():
-                    category = cat
-                    break
-        if store_name or category:
+            if ent.label_ in ["PRODUCT", "ORG"]:
+                product_name = ent.text
             break
 
-    # Build query vector
-    if store_name:
-        query_vectors = [embeddings.embed_query(f"{query_prefix} {store_name}")]
-    elif category:
-        query_vectors = [embeddings.embed_query(f"{query_prefix} {category} stores")]
-    else:
-        query_vectors = [embeddings.embed_query(f"{query_prefix} {item}") for item in query_items]
-
-    avg_vector = [sum(v[i] for v in query_vectors) / len(query_vectors) for i in range(len(query_vectors[0]))]
-
-    # Enhance with history
-    if state.conversation_history and any(word in state.query.lower() for word in ["they", "it", "that", "this", "there", "those"]):
-        last_response = next((msg["content"] for msg in reversed(state.conversation_history[-6:]) if msg["role"] == "assistant"), "")
-        if last_response:
-            history_vector = embeddings.embed_query(last_response)
-            avg_vector = [(a + h) / 2 for a, h in zip(avg_vector, history_vector)]
-
-    # Pinecone query
-    filter_dict = {"mall_id": state.mall_id}
+    # Build query vector focused on products
+    product_query_vector = embeddings.embed_query(f"product {product_name if product_name else state.query}")
+    
+    # Pinecone query with filter specifically for products
+    filter_dict = {"mall_id": state.mall_id, "type": "product"}
     try:
         results = await asyncio.to_thread(
             index.query, 
-            vector=avg_vector, 
-            top_k=25, 
+            vector=product_query_vector, 
+            top_k=15,  # Reduced number - more focused 
             include_metadata=True, 
             filter=filter_dict
         )
         matches = results.get("matches", [])
         state.initial_context = [{"id": doc["id"], "score": float(doc["score"]), "metadata": doc["metadata"]} for doc in matches]
+        
+        # If we don't find products, try searching for stores that might have those products
+        if len(matches) < 3 and product_name:
+            store_filter = {"mall_id": state.mall_id, "type": "store"}
+            store_results = await asyncio.to_thread(
+                index.query,
+                vector=embeddings.embed_query(f"store selling {product_name}"),
+                top_k=5,
+                include_metadata=True,
+                filter=store_filter
+            )
+            store_matches = store_results.get("matches", [])
+            for doc in store_matches:
+                state.initial_context.append({"id": doc["id"], "score": float(doc["score"]) * 0.8, "metadata": doc["metadata"]})
+    
     except Exception as e:
-        logger.error(f"Pinecone query error: {e}")
+        logger.error(f"Pinecone query error for product context: {e}")
         state.initial_context = []
+    
+    # Before returning, process any location codes
+    for item in state.initial_context:
+        if "metadata" in item and item["metadata"]:
+            if "location" in item["metadata"]:
+                item["metadata"]["location"] = convert_location_codes(item["metadata"]["location"])
     
     REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
     return state
 
+async def retrieve_mall_context(state: CustomerState) -> CustomerState:
+    if not state.mall_id:
+        state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
+        return state
+    
+    # Specialized query for mall information
+    cache_key = f"mall_context:{state.query}:{state.mall_id}"
+    cached_context = REDIS_CLIENT.get(cache_key)
+    if cached_context:
+        state.initial_context = json.loads(cached_context)
+        return state
+    
+    # For mall info, we focus on amenities, directions, hours, and general mall data
+    mall_query_vector = embeddings.embed_query(f"mall information {state.query}")
+    
+    # Get mall information directly from database
+    mall_info = await db_fetch_one_async(
+        """SELECT marketing_name, address, description, opening_hours, map_url, contact_info 
+        FROM malls WHERE unique_property_id = $1""",
+        (state.mall_id,)
+    )
+    
+    if mall_info:
+        # Create a synthetic context entry for the mall itself
+        mall_metadata = {
+            "type": "mall",
+            "name": mall_info.get("marketing_name", ""),
+            "address": mall_info.get("address", ""),
+            "description": mall_info.get("description", ""),
+            "opening_hours": mall_info.get("opening_hours", ""),
+            "map_url": mall_info.get("map_url", ""),
+            "contact_info": mall_info.get("contact_info", ""),
+            "mall_id": state.mall_id
+        }
+        state.initial_context = [{"id": f"mall_{state.mall_id}", "score": 1.0, "metadata": mall_metadata}]
+    
+    # Also fetch amenities
+    try:
+        amenity_filter = {"mall_id": state.mall_id, "type": "amenity"}
+        amenity_results = await asyncio.to_thread(
+            index.query,
+            vector=mall_query_vector,
+            top_k=10,
+            include_metadata=True,
+            filter=amenity_filter
+        )
+        amenity_matches = amenity_results.get("matches", [])
+        for doc in amenity_matches:
+            state.initial_context.append({"id": doc["id"], "score": float(doc["score"]), "metadata": doc["metadata"]})
+    except Exception as e:
+        logger.error(f"Pinecone query error for mall context: {e}")
+    
+    # Before returning, process any location codes
+    for item in state.initial_context:
+        if "metadata" in item and item["metadata"]:
+            if "location" in item["metadata"]:
+                item["metadata"]["location"] = convert_location_codes(item["metadata"]["location"])
+    
+    REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
+    return state
+
+async def retrieve_offer_event_context(state: CustomerState) -> CustomerState:
+    if not state.mall_id:
+        state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
+        return state
+    
+    # Specialized query for offers and events
+    cache_key = f"offer_event_context:{state.query}:{state.mall_id}"
+    cached_context = REDIS_CLIENT.get(cache_key)
+    if cached_context:
+        state.initial_context = json.loads(cached_context)
+        return state
+    
+    # Get current date for filtering current/future events
+    current_date = datetime.now().isoformat()
+    
+    # Directly query database for latest offers and events
+    engagements = await db_fetch_all_async(
+        """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
+           e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, b.brand_name_en
+           FROM engagements e 
+           LEFT JOIN brands b ON e.brand_id = b.brand_id
+           WHERE e.unique_property_id = $1 AND 
+           (e.end_date >= $2 OR e.end_date IS NULL)
+           ORDER BY e.start_date ASC""",
+        (state.mall_id, current_date)
+    )
+    
+    # Format engagements as initial context
+    state.initial_context = []
+    for engagement in engagements:
+        engagement_type = engagement.get("type", "").lower()
+        metadata = {
+            "type": engagement_type,
+            "title": engagement.get("title_en", ""),
+            "description": engagement.get("description_en", ""),
+            "start_date": engagement.get("start_date", ""),
+            "end_date": engagement.get("end_date", ""),
+            "terms": engagement.get("terms_conditions_en", ""),
+            "is_exclusive": bool(engagement.get("is_exclusive", 0)),
+            "mall_id": state.mall_id,
+            "brand_id": engagement.get("brand_id"),
+            "brand_name": engagement.get("brand_name_en", "")
+        }
+        state.initial_context.append({
+            "id": f"engagement_{engagement['engagement_id']}",
+            "score": 1.0,  # Direct database lookup, high confidence
+            "metadata": metadata
+        })
+    
+    # If looking for a specific brand's offers, prioritize those
+    if state.context_data and state.context_data.get("resolved_entity"):
+        brand_name = state.context_data.get("resolved_entity").lower()
+        for item in state.initial_context:
+            if item["metadata"].get("brand_name", "").lower() == brand_name:
+                item["score"] = 1.5  # Boost score for matching brand
+    
+    # Sort by score descending
+    state.initial_context.sort(key=lambda x: x["score"], reverse=True)
+    
+    # Before returning, process any location codes
+    for item in state.initial_context:
+        if "metadata" in item and item["metadata"]:
+            if "location" in item["metadata"]:
+                item["metadata"]["location"] = convert_location_codes(item["metadata"]["location"])
+    
+    REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
+    return state
+
+async def retrieve_services_context(state: CustomerState) -> CustomerState:
+    if not state.mall_id:
+        state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
+        return state
+    
+    # Specialized query for services
+    cache_key = f"services_context:{state.query}:{state.mall_id}"
+    cached_context = REDIS_CLIENT.get(cache_key)
+    if cached_context:
+        state.initial_context = json.loads(cached_context)
+        return state
+    
+    # Directly query database for services
+    services = await db_fetch_all_async(
+        """SELECT s.id, s.name, s.description, s.location, s.is_available
+           FROM services s
+           WHERE s.unique_property_id = $1""",
+        (state.mall_id,)
+    )
+    
+    # Format services as initial context
+    state.initial_context = []
+    for service in services:
+        metadata = {
+            "type": "service",
+            "name": service.get("name", ""),
+            "description": service.get("description", ""),
+            "location": service.get("location", ""),
+            "is_available": service.get("is_available", True),
+            "mall_id": state.mall_id
+        }
+        state.initial_context.append({
+            "id": f"service_{service['id']}",
+            "score": 1.0,  # Direct database lookup
+            "metadata": metadata
+        })
+    
+    # Also include amenities as they're often related to services
+    try:
+        service_query_vector = embeddings.embed_query(f"mall service {state.query}")
+        amenity_filter = {"mall_id": state.mall_id, "type": "amenity"}
+        amenity_results = await asyncio.to_thread(
+            index.query,
+            vector=service_query_vector,
+            top_k=5,
+            include_metadata=True,
+            filter=amenity_filter
+        )
+        amenity_matches = amenity_results.get("matches", [])
+        for doc in amenity_matches:
+            state.initial_context.append({"id": doc["id"], "score": float(doc["score"]), "metadata": doc["metadata"]})
+    except Exception as e:
+        logger.error(f"Pinecone query error for services context: {e}")
+    
+    # Before returning, process any location codes
+    for item in state.initial_context:
+        if "metadata" in item and item["metadata"]:
+            if "location" in item["metadata"]:
+                item["metadata"]["location"] = convert_location_codes(item["metadata"]["location"])
+    
+    REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
+    return state
+
+async def retrieve_family_planning_context(state: CustomerState) -> CustomerState:
+    """Specialized query function for family planning and kid-friendly activities"""
+    if not state.mall_id:
+        state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
+        return state
+    
+    # Cache for family planning context
+    cache_key = f"family_planning_context:{state.query}:{state.mall_id}"
+    cached_context = REDIS_CLIENT.get(cache_key)
+    if cached_context:
+        state.initial_context = json.loads(cached_context)
+        return state
+    
+    # Initialize context
+    state.initial_context = []
+    
+    # First, get kid-friendly stores
+    kid_friendly_categories = ["toys", "kids", "children", "baby", "family", "play", "games"]
+    food_family_keywords = ["family meal", "kids menu", "children menu", "play area"]
+    
+    # Get mall information for operating hours and facilities
+    mall_info = await db_fetch_one_async(
+        """SELECT marketing_name, description, opening_hours, map_url, contact_info 
+        FROM malls WHERE unique_property_id = $1""",
+        (state.mall_id,)
+    )
+    
+    if mall_info:
+        # Create a synthetic context entry for the mall itself with family focus
+        mall_metadata = {
+            "type": "mall",
+            "name": mall_info.get("marketing_name", ""),
+            "description": mall_info.get("description", ""),
+            "opening_hours": mall_info.get("opening_hours", ""),
+            "map_url": mall_info.get("map_url", ""),
+            "contact_info": mall_info.get("contact_info", ""),
+            "mall_id": state.mall_id
+        }
+        state.initial_context.append({"id": f"mall_{state.mall_id}", "score": 1.0, "metadata": mall_metadata})
+    
+    # Fetch family-friendly stores
+    all_stores = await db_fetch_all_async(
+        """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
+           b.pms_unit_codes
+           FROM brands b 
+           JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+           WHERE bma.unique_property_id = $1""", 
+        (state.mall_id,)
+    )
+    
+    for store in all_stores:
+        category = store.get("category_name", "").lower()
+        description = store.get("description_en", "").lower() if store.get("description_en") else ""
+        
+        # Check if this is a kid-friendly store based on category or description
+        is_kid_friendly = any(kid_term in category for kid_term in kid_friendly_categories) or \
+                          any(kid_term in description for kid_term in kid_friendly_categories)
+        
+        if is_kid_friendly:
+            metadata = {
+                "type": "store",
+                "name_en": store["brand_name_en"],
+                "category_en": category,
+                "description_en": description,
+                "brand_id": store["brand_id"],
+                "location": store.get("pms_unit_codes", {}),
+                "mall_id": state.mall_id,
+                "is_kid_friendly": True
+            }
+            state.initial_context.append({
+                "id": f"brand_{store['brand_id']}",
+                "score": 0.95,
+                "metadata": metadata
+            })
+    
+    # Fetch family-friendly restaurants
+    restaurants = await db_fetch_all_async(
+        """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
+           b.pms_unit_codes
+           FROM brands b 
+           JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+           WHERE bma.unique_property_id = $1 AND 
+           (LOWER(b.category_name) LIKE '%restaurant%' OR 
+            LOWER(b.category_name) LIKE '%food%' OR 
+            LOWER(b.category_name) LIKE '%cafe%' OR
+            LOWER(b.category_name) LIKE '%dining%')""", 
+        (state.mall_id,)
+    )
+    
+    for restaurant in restaurants:
+        description = restaurant.get("description_en", "").lower() if restaurant.get("description_en") else ""
+        
+        # Check if this is a family-friendly restaurant
+        is_family_friendly = any(term in description for term in food_family_keywords)
+        
+        if is_family_friendly:
+            metadata = {
+                "type": "store",
+                "name_en": restaurant["brand_name_en"],
+                "category_en": restaurant.get("category_name", ""),
+                "description_en": description,
+                "brand_id": restaurant["brand_id"],
+                "location": restaurant.get("pms_unit_codes", {}),
+                "mall_id": state.mall_id,
+                "is_family_friendly": True
+            }
+            state.initial_context.append({
+                "id": f"restaurant_{restaurant['brand_id']}",
+                "score": 0.9,
+                "metadata": metadata
+            })
+    
+    # Fetch family-oriented events and offers
+    engagements = await db_fetch_all_async(
+        """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
+           e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, b.brand_name_en
+           FROM engagements e 
+           LEFT JOIN brands b ON e.brand_id = b.brand_id
+           WHERE e.unique_property_id = $1""",
+        (state.mall_id,)
+    )
+    
+    for engagement in engagements:
+        title = engagement.get("title_en", "").lower()
+        description = engagement.get("description_en", "").lower()
+        
+        # Check if this is a family-oriented event or offer
+        is_family_oriented = any(kid_term in title or kid_term in description for kid_term in kid_friendly_categories)
+        
+        if is_family_oriented:
+            engagement_type = engagement.get("type", "").lower()
+            metadata = {
+                "type": engagement_type,
+                "title": engagement.get("title_en", ""),
+                "description": engagement.get("description_en", ""),
+                "start_date": engagement.get("start_date", ""),
+                "end_date": engagement.get("end_date", ""),
+                "terms": engagement.get("terms_conditions_en", ""),
+                "is_exclusive": bool(engagement.get("is_exclusive", 0)),
+                "mall_id": state.mall_id,
+                "brand_id": engagement.get("brand_id"),
+                "brand_name": engagement.get("brand_name_en", ""),
+                "is_family_oriented": True
+            }
+            state.initial_context.append({
+                "id": f"engagement_{engagement['engagement_id']}",
+                "score": 0.95,
+                "metadata": metadata
+            })
+
+    # Fetch services like play areas, nursing rooms, family restrooms
+    family_services = await db_fetch_all_async(
+        """SELECT s.id, s.name, s.description, s.location, s.is_available
+           FROM services s
+           WHERE s.unique_property_id = $1 AND 
+           (LOWER(s.name) LIKE '%family%' OR 
+            LOWER(s.name) LIKE '%kid%' OR 
+            LOWER(s.name) LIKE '%child%' OR
+            LOWER(s.name) LIKE '%play%' OR
+            LOWER(s.name) LIKE '%baby%' OR
+            LOWER(s.name) LIKE '%stroller%' OR
+            LOWER(s.name) LIKE '%nursing%')""",
+        (state.mall_id,)
+    )
+    
+    for service in family_services:
+        metadata = {
+            "type": "service",
+            "name": service.get("name", ""),
+            "description": service.get("description", ""),
+            "location": service.get("location", ""),
+            "is_available": service.get("is_available", True),
+            "mall_id": state.mall_id,
+            "is_family_service": True
+        }
+        state.initial_context.append({
+            "id": f"family_service_{service['id']}",
+            "score": 1.0, # High priority for family services
+            "metadata": metadata
+        })
+    
+    # Sort the results by score
+    state.initial_context.sort(key=lambda x: x["score"], reverse=True)
+    
+    # Before returning, process any location codes
+    for item in state.initial_context:
+        if "metadata" in item and item["metadata"]:
+            if "location" in item["metadata"]:
+                item["metadata"]["location"] = convert_location_codes(item["metadata"]["location"])
+    
+    # Cache the results
+    REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
+    return state
+
+async def retrieve_visit_planning_context(state: CustomerState) -> CustomerState:
+    """Specialized query function for visit planning and itinerary creation"""
+    if not state.mall_id:
+        state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
+        return state
+    
+    # Cache for visit planning context
+    cache_key = f"visit_planning_context:{state.query}:{state.mall_id}"
+    cached_context = REDIS_CLIENT.get(cache_key)
+    if cached_context:
+        state.initial_context = json.loads(cached_context)
+        return state
+    
+    # Initialize context
+    state.initial_context = []
+    
+    # First, get mall information for operating hours and facilities
+    mall_info = await db_fetch_one_async(
+        """SELECT marketing_name, description, opening_hours, map_url, contact_info 
+        FROM malls WHERE unique_property_id = $1""",
+        (state.mall_id,)
+    )
+    
+    if mall_info:
+        # Create a synthetic context entry for the mall itself
+        mall_metadata = {
+            "type": "mall",
+            "name": mall_info.get("marketing_name", ""),
+            "description": mall_info.get("description", ""),
+            "opening_hours": mall_info.get("opening_hours", ""),
+            "map_url": mall_info.get("map_url", ""),
+            "contact_info": mall_info.get("contact_info", ""),
+            "mall_id": state.mall_id
+        }
+        state.initial_context.append({"id": f"mall_{state.mall_id}", "score": 1.0, "metadata": mall_metadata})
+    
+    # Get current date for filtering current/future events
+    current_date = datetime.now().isoformat()
+    
+    # Fetch current events
+    events = await db_fetch_all_async(
+        """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
+           e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, b.brand_name_en
+           FROM engagements e 
+           LEFT JOIN brands b ON e.brand_id = b.brand_id
+           WHERE e.unique_property_id = $1 AND 
+           e.type = 'event' AND
+           (e.end_date >= $2 OR e.end_date IS NULL)
+           ORDER BY e.start_date ASC
+           LIMIT 5""",
+        (state.mall_id, current_date)
+    )
+    
+    for event in events:
+        metadata = {
+            "type": "event",
+            "title": event.get("title_en", ""),
+            "description": event.get("description_en", ""),
+            "start_date": event.get("start_date", ""),
+            "end_date": event.get("end_date", ""),
+            "terms": event.get("terms_conditions_en", ""),
+            "mall_id": state.mall_id,
+            "brand_id": event.get("brand_id"),
+            "brand_name": event.get("brand_name_en", "")
+        }
+        state.initial_context.append({
+            "id": f"event_{event['engagement_id']}",
+            "score": 0.95,
+            "metadata": metadata
+        })
+    
+    # Fetch exclusive or highlighted offers
+    offers = await db_fetch_all_async(
+        """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
+           e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, b.brand_name_en
+           FROM engagements e 
+           LEFT JOIN brands b ON e.brand_id = b.brand_id
+           WHERE e.unique_property_id = $1 AND 
+           e.type = 'offer' AND
+           e.is_exclusive = true AND
+           (e.end_date >= $2 OR e.end_date IS NULL)
+           ORDER BY e.is_exclusive DESC, e.start_date ASC
+           LIMIT 5""",
+        (state.mall_id, current_date)
+    )
+    
+    for offer in offers:
+        metadata = {
+            "type": "offer",
+            "title": offer.get("title_en", ""),
+            "description": offer.get("description_en", ""),
+            "start_date": offer.get("start_date", ""),
+            "end_date": offer.get("end_date", ""),
+            "terms": offer.get("terms_conditions_en", ""),
+            "is_exclusive": True,
+            "mall_id": state.mall_id,
+            "brand_id": offer.get("brand_id"),
+            "brand_name": offer.get("brand_name_en", "")
+        }
+        state.initial_context.append({
+            "id": f"offer_{offer['engagement_id']}",
+            "score": 0.9,
+            "metadata": metadata
+        })
+    
+    # Fetch popular dining options
+    restaurants = await db_fetch_all_async(
+        """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
+           b.pms_unit_codes
+           FROM brands b 
+           JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+           WHERE bma.unique_property_id = $1 AND 
+           (LOWER(b.category_name) LIKE '%restaurant%' OR 
+            LOWER(b.category_name) LIKE '%food%' OR 
+            LOWER(b.category_name) LIKE '%cafe%' OR
+            LOWER(b.category_name) LIKE '%dining%')
+           LIMIT 5""", 
+        (state.mall_id,)
+    )
+    
+    for restaurant in restaurants:
+        metadata = {
+            "type": "store",
+            "name_en": restaurant["brand_name_en"],
+            "category_en": restaurant.get("category_name", ""),
+            "description_en": restaurant.get("description_en", ""),
+            "brand_id": restaurant["brand_id"],
+            "location": restaurant.get("pms_unit_codes", {}),
+            "mall_id": state.mall_id
+        }
+        state.initial_context.append({
+            "id": f"restaurant_{restaurant['brand_id']}",
+            "score": 0.85,
+            "metadata": metadata
+        })
+    
+    # Fetch popular shopping stores
+    stores = await db_fetch_all_async(
+        """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
+           b.pms_unit_codes
+           FROM brands b 
+           JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+           WHERE bma.unique_property_id = $1 AND 
+           (LOWER(b.category_name) LIKE '%fashion%' OR 
+            LOWER(b.category_name) LIKE '%clothing%' OR 
+            LOWER(b.category_name) LIKE '%apparel%' OR
+            LOWER(b.category_name) LIKE '%accessories%')
+           LIMIT 5""", 
+        (state.mall_id,)
+    )
+    
+    for store in stores:
+        metadata = {
+            "type": "store",
+            "name_en": store["brand_name_en"],
+            "category_en": store.get("category_name", ""),
+            "description_en": store.get("description_en", ""),
+            "brand_id": store["brand_id"],
+            "location": store.get("pms_unit_codes", {}),
+            "mall_id": state.mall_id
+        }
+        state.initial_context.append({
+            "id": f"store_{store['brand_id']}",
+            "score": 0.8,
+            "metadata": metadata
+        })
+    
+    # Fetch entertainment options
+    entertainment = await db_fetch_all_async(
+        """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
+           b.pms_unit_codes
+           FROM brands b 
+           JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+           WHERE bma.unique_property_id = $1 AND 
+           (LOWER(b.category_name) LIKE '%entertainment%' OR 
+            LOWER(b.category_name) LIKE '%cinema%' OR 
+            LOWER(b.category_name) LIKE '%movie%' OR
+            LOWER(b.category_name) LIKE '%game%' OR
+            LOWER(b.category_name) LIKE '%play%' OR
+            LOWER(b.category_name) LIKE '%arcade%')
+           LIMIT 3""", 
+        (state.mall_id,)
+    )
+    
+    for venue in entertainment:
+        metadata = {
+            "type": "store",
+            "name_en": venue["brand_name_en"],
+            "category_en": venue.get("category_name", ""),
+            "description_en": venue.get("description_en", ""),
+            "brand_id": venue["brand_id"],
+            "location": venue.get("pms_unit_codes", {}),
+            "mall_id": state.mall_id,
+            "is_entertainment": True
+        }
+        state.initial_context.append({
+            "id": f"entertainment_{venue['brand_id']}",
+            "score": 0.9,
+            "metadata": metadata
+        })
+    
+    # Before returning, process any location codes
+    for item in state.initial_context:
+        if "metadata" in item and item["metadata"]:
+            if "location" in item["metadata"]:
+                item["metadata"]["location"] = convert_location_codes(item["metadata"]["location"])
+    
+    # Cache the results
+    REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
+    return state
+
+async def retrieve_fallback_context(state: CustomerState) -> CustomerState:
+    # Use original initial_retrieval as fallback
+    await initial_retrieval(state)
+    
+    # Before returning, process any location codes
+    for item in state.initial_context or []:
+        if "metadata" in item and item["metadata"]:
+            if "location" in item["metadata"]:
+                item["metadata"]["location"] = convert_location_codes(item["metadata"]["location"])
+    
+    return state
+
+# Add this function before the refine_context function
+def convert_location_codes(location_data):
+    """Convert raw location codes to human-readable format"""
+    if not location_data:
+        return location_data
+    
+    if isinstance(location_data, list):
+        # Handle list of location codes
+        converted_locations = []
+        for code in location_data:
+            if isinstance(code, str):
+                converted = convert_single_location_code(code)
+                converted_locations.append(converted)
+            else:
+                converted_locations.append(code)
+        return converted_locations
+    elif isinstance(location_data, dict):
+        # Handle dictionary of location data
+        converted_locations = {}
+        for key, code in location_data.items():
+            if isinstance(code, str):
+                converted = convert_single_location_code(code)
+                converted_locations[key] = converted
+            else:
+                converted_locations[key] = code
+        return converted_locations
+    elif isinstance(location_data, str):
+        # Handle single location code
+        return convert_single_location_code(location_data)
+    
+    return location_data
+
+def convert_single_location_code(code):
+    """Convert a single location code to human-readable format"""
+    import re
+    
+    if not isinstance(code, str):
+        return code
+    
+    # Define common location code prefixes and their readable formats
+    location_map = {
+        "FF": "First Floor",
+        "GF": "Ground Floor",
+        "BSW": "Basement West",
+        "BSE": "Basement East",
+        "BS": "Basement",
+        "F1": "First Floor",
+        "F2": "Second Floor",
+        "F3": "Third Floor",
+        "F4": "Fourth Floor",
+        "F5": "Fifth Floor",
+        "L1": "Level 1",
+        "L2": "Level 2",
+        "L3": "Level 3",
+        "G": "Ground Floor"
+    }
+    
+    # Match a location prefix followed by digits
+    match = re.match(r'([A-Za-z]+)(\d+.*)', code)
+    if match:
+        prefix, number_part = match.groups()
+        if prefix in location_map:
+            return f"{location_map[prefix]}, Shop #{number_part}"
+    
+    # If no match found or prefix not in our map, return the original code
+    return code
+
+# Modify the beginning of the refine_context function to process location codes
 async def refine_context(state: CustomerState) -> CustomerState:
     if not state.mall_id:
         state.response = "Please select a mall first."
@@ -919,10 +1467,32 @@ async def refine_context(state: CustomerState) -> CustomerState:
     context["category_types"]["product"] = sorted(list(context["category_types"]["product"]))
     context["category_types"]["store"] = sorted(list(context["category_types"]["store"]))
 
+    # At the end, preprocess all location codes to readable format
+    # Process store locations
+    for store in context["stores"]:
+        if "location" in store:
+            store["location"] = convert_location_codes(store["location"])
+    
+    # Process product locations via store
+    for product in context["products"]:
+        if "location" in product:
+            product["location"] = convert_location_codes(product["location"])
+    
+    # Process service locations
+    for service in context["services"]:
+        if "location" in service:
+            service["location"] = convert_location_codes(service["location"])
+    
+    # Process neighboring stores locations
+    for store in context["neighboring_stores"]:
+        if "location" in store:
+            store["location"] = convert_location_codes(store["location"])
+
     state.context_data = context
     state.response = json.dumps(convert_to_json_safe(context))
     return state
 
+# Add back the generate_response function with conversation tracking
 async def generate_response(state: CustomerState) -> CustomerState:
     if not state.mall_id:
         state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
@@ -952,6 +1522,26 @@ async def generate_response(state: CustomerState) -> CustomerState:
                     state.needs_type_follow_up = False
                     break
     
+    # Track conversation topic for multi-turn handling
+    current_topic = state.query_type or ""
+    if state.intent:
+        current_topic += "_" + state.intent
+    
+    # If we have a resolved entity, add it to the topic for better tracking
+    if resolved_entity:
+        current_topic += "_" + resolved_entity.lower().replace(" ", "_")
+    
+    # Check if this is continuing the same conversation topic
+    if state.conversation_topic and current_topic and state.conversation_topic in current_topic:
+        # Still on the same general topic
+        state.topic_turn_count += 1
+    else:
+        # New topic
+        state.conversation_topic = current_topic
+        state.topic_turn_count = 1
+    
+    logger.info(f"Conversation topic: {state.conversation_topic}, Turn count: {state.topic_turn_count}")
+    
     try:
         response = await asyncio.to_thread(
             customer_chain.invoke,
@@ -962,10 +1552,20 @@ async def generate_response(state: CustomerState) -> CustomerState:
                 "conversation_history": formatted_history,
                 "mall_name": mall_name,
                 "resolved_entity": resolved_entity,
-                "type_preference": state.type_preference or "",
-                "needs_type_follow_up": state.needs_type_follow_up
+                "topic_turn_count": state.topic_turn_count,
+                "conversation_topic": state.conversation_topic
             }
         )
+        
+        # For family planning and visit planning queries that are follow-ups,
+        # we should progressively build an itinerary/plan
+        if state.query_type in ["family_planning_query", "visit_planning_query"] and state.topic_turn_count > 1:
+            # Add a note about the progressive nature of the conversation
+            if state.topic_turn_count >= 3:
+                # After 3 turns, we should finalize the plan/itinerary
+                if "plan" not in response.lower() and "itinerary" not in response.lower():
+                    response += "\n\nI've put together this visit plan based on your preferences. Enjoy your visit to the mall!"
+            
         state.response = response
     except Exception as e:
         logger.error(f"Error generating response: {e}")
@@ -973,39 +1573,184 @@ async def generate_response(state: CustomerState) -> CustomerState:
     
     return state
 
+# Add back the initial_retrieval function needed by retrieve_fallback_context
+async def initial_retrieval(state: CustomerState) -> CustomerState:
+    if not state.mall_id:
+        state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
+        return state
+
+    cache_key = f"initial_context:{state.query}:{state.intent}:{state.user_id or 'anon'}:{state.mall_id}"
+    cached_context = REDIS_CLIENT.get(cache_key)
+    if cached_context:
+        state.initial_context = json.loads(cached_context)
+        return state
+
+    query_items = [item.strip() for item in state.query.split("\n") if item.strip()] if "\n" in state.query else [state.query]
+    intent_prefixes = {
+        "store_info": "store",
+        "store_navigate": "store",
+        "store_recommend": "store",
+        "store_list": "store",
+        "product_info": "product",
+        "product_recommend": "product",
+        "product_list": "product",
+        "offer_info": "offer",
+        "offer_recommend": "offer",
+        "offer_list": "offer",
+        "event_info": "event",
+        "event_recommend": "event",
+        "event_list": "event",
+        "service_info": "service",
+        "service_recommend": "service",
+        "service_list": "service",
+        "amenity_info": "amenity",
+        "amenity_navigate": "amenity",
+        "amenity_list": "amenity",
+    }
+    entity_type = state.intent.split("_")[0]
+    query_prefix = intent_prefixes.get(state.intent, entity_type)
+
+    # Extract store name or category
+    store_name, category = None, None
+    all_brands = await db_fetch_all_async(
+        "SELECT b.brand_name_en, b.category_name FROM brands b JOIN brand_mall_association bma ON b.brand_id = bma.brand_id WHERE bma.unique_property_id = $1", 
+        (state.mall_id,)
+    )
+    store_names = [s["brand_name_en"].lower() for s in all_brands if s["brand_name_en"]]
+    categories = set(s["category_name"].lower() for s in all_brands if s["category_name"])
+    for item in query_items:
+        doc = nlp(item.lower())
+        for ent in doc.ents:
+            if ent.text in store_names:
+                store_name = ent.text
+                break
+        if not store_name:
+            for name in store_names:
+                if name in item.lower():
+                    store_name = name
+                    break
+        if not store_name:
+            for cat in categories:
+                if cat in item.lower():
+                    category = cat
+                    break
+        if store_name or category:
+            break
+
+    # Build query vector
+    if store_name:
+        query_vectors = [embeddings.embed_query(f"{query_prefix} {store_name}")]
+    elif category:
+        query_vectors = [embeddings.embed_query(f"{query_prefix} {category} stores")]
+    else:
+        query_vectors = [embeddings.embed_query(f"{query_prefix} {item}") for item in query_items]
+
+    avg_vector = [sum(v[i] for v in query_vectors) / len(query_vectors) for i in range(len(query_vectors[0]))]
+
+    # Enhance with history
+    if state.conversation_history and any(word in state.query.lower() for word in ["they", "it", "that", "this", "there", "those"]):
+        last_response = next((msg["content"] for msg in reversed(state.conversation_history[-6:]) if msg["role"] == "assistant"), "")
+        if last_response:
+            history_vector = embeddings.embed_query(last_response)
+            avg_vector = [(a + h) / 2 for a, h in zip(avg_vector, history_vector)]
+
+    # Pinecone query
+    filter_dict = {"mall_id": state.mall_id}
+    try:
+        results = await asyncio.to_thread(
+            index.query, 
+            vector=avg_vector, 
+            top_k=25, 
+            include_metadata=True, 
+            filter=filter_dict
+        )
+        matches = results.get("matches", [])
+        state.initial_context = [{"id": doc["id"], "score": float(doc["score"]), "metadata": doc["metadata"]} for doc in matches]
+    except Exception as e:
+        logger.error(f"Pinecone query error: {e}")
+        state.initial_context = []
+    
+    REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
+    return state
+
 async def fetch_loyalty_data(state: CustomerState) -> CustomerState:
     # Since loyalty tables don't exist in the schema, we'll return a message that it's not available
     state.response = "I'm sorry, but the loyalty program features are not available at this time."
     return state
 
-# Workflow
+# Update the workflow
 customer_workflow = StateGraph(CustomerState)
+customer_workflow.add_node("classify_query_type", classify_query_type)
 customer_workflow.add_node("classify_intent", classify_intent)
-customer_workflow.add_node("initial_retrieval", initial_retrieval)
+customer_workflow.add_node("retrieve_product_context", retrieve_product_context)
+customer_workflow.add_node("retrieve_mall_context", retrieve_mall_context)
+customer_workflow.add_node("retrieve_offer_event_context", retrieve_offer_event_context)
+customer_workflow.add_node("retrieve_services_context", retrieve_services_context)
+customer_workflow.add_node("retrieve_family_planning_context", retrieve_family_planning_context)
+customer_workflow.add_node("retrieve_visit_planning_context", retrieve_visit_planning_context)
+customer_workflow.add_node("retrieve_fallback_context", retrieve_fallback_context)
 customer_workflow.add_node("refine_context", refine_context)
 customer_workflow.add_node("respond", generate_response)
 customer_workflow.add_node("fetch_loyalty_data", fetch_loyalty_data)
-customer_workflow.set_entry_point("classify_intent")
 
-def route_after_classify(state: CustomerState):
+# Set entry point to the new node
+customer_workflow.set_entry_point("classify_query_type")
+
+# Route from query_type classification to intent classification
+customer_workflow.add_edge("classify_query_type", "classify_intent")
+
+# Route from intent classification to the appropriate context retrieval function
+def route_after_intent_classify(state: CustomerState):
     if state.intent in ["loyalty_balance", "loyalty_programs"]:
         return "fetch_loyalty_data"
     elif state.intent and state.intent.startswith("other_") and state.response:
         return "respond"
     else:
-        return "initial_retrieval"
+        # Use the query_type to determine which retrieval function to use
+        if state.query_type == "product_info_query":
+            return "retrieve_product_context"
+        elif state.query_type == "mall_info_query":
+            return "retrieve_mall_context"
+        elif state.query_type == "offer_or_event_info_query":
+            return "retrieve_offer_event_context"
+        elif state.query_type == "services_info_query":
+            return "retrieve_services_context"
+        elif state.query_type == "family_planning_query":
+            return "retrieve_family_planning_context"
+        elif state.query_type == "visit_planning_query":
+            return "retrieve_visit_planning_context"
+        else:
+            return "retrieve_fallback_context"
     
 customer_workflow.add_conditional_edges(
     "classify_intent",
-    route_after_classify,
+    route_after_intent_classify,
     {
         "fetch_loyalty_data": "fetch_loyalty_data",
         "respond": "respond",
-        "initial_retrieval": "initial_retrieval",
+        "retrieve_product_context": "retrieve_product_context",
+        "retrieve_mall_context": "retrieve_mall_context",
+        "retrieve_offer_event_context": "retrieve_offer_event_context",
+        "retrieve_services_context": "retrieve_services_context",
+        "retrieve_family_planning_context": "retrieve_family_planning_context",
+        "retrieve_visit_planning_context": "retrieve_visit_planning_context",
+        "retrieve_fallback_context": "retrieve_fallback_context",
     }
 )
+
+# Connect all retrieval nodes to refine_context
+customer_workflow.add_edge("retrieve_product_context", "refine_context")
+customer_workflow.add_edge("retrieve_mall_context", "refine_context")
+customer_workflow.add_edge("retrieve_offer_event_context", "refine_context")
+customer_workflow.add_edge("retrieve_services_context", "refine_context")
+customer_workflow.add_edge("retrieve_family_planning_context", "refine_context")
+customer_workflow.add_edge("retrieve_visit_planning_context", "refine_context")
+customer_workflow.add_edge("retrieve_fallback_context", "refine_context")
+
+# Finish the workflow
 customer_workflow.add_edge("fetch_loyalty_data", END)
-customer_workflow.add_edge("initial_retrieval", "refine_context")
 customer_workflow.add_edge("refine_context", "respond")
 customer_workflow.add_edge("respond", END)
+
+# Compile the workflow
 customer_graph = customer_workflow.compile()
