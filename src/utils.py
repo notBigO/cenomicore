@@ -4,7 +4,7 @@ from decimal import Decimal
 import json
 import logging
 import os
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from pydantic import BaseModel
 from langdetect import detect
 from dotenv import load_dotenv
@@ -12,6 +12,7 @@ import redis
 import asyncpg
 from asyncpg.pool import Pool
 import uuid
+import functools
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -26,7 +27,7 @@ DB_CONFIG_ASYNC = {
     "user": os.getenv("DB_USER", "postgres"),
     "password": os.getenv("DB_PASSWORD", "your_password"),
     "host": os.getenv("DB_HOST", "localhost"),
-    "port": os.getenv("DB_PORT", "5432")
+    "port": int(os.getenv("DB_PORT", "5432"))  # Convert port to int
 }
 
 # Redis setup
@@ -147,6 +148,11 @@ async def get_conversation_history(conversation_id: str, max_messages: int = 20)
     cache_key = f"history:{conversation_id}"
     cached_history = REDIS_CLIENT.get(cache_key)
     if cached_history:
+        # Ensure properly decoded string for JSON loading
+        if isinstance(cached_history, bytes):
+            cached_history = cached_history.decode('utf-8')
+        elif not isinstance(cached_history, str):
+            cached_history = str(cached_history)
         return [Message(**msg) for msg in json.loads(cached_history)]
     
     messages = await db_fetch_all_async(
@@ -159,4 +165,53 @@ async def get_conversation_history(conversation_id: str, max_messages: int = 20)
         for msg in reversed(messages)
     ]
     REDIS_CLIENT.set(cache_key, json.dumps([msg.dict() for msg in history], cls=DateTimeEncoder), ex=300)
+    return history
+
+# Optimized history fetch with improved caching
+async def get_history_cached(conversation_id: str, max_messages: int = 20) -> List[Dict[str, Any]]:
+    """
+    Optimized function to get conversation history with enhanced caching.
+    Uses a TTL cache and batched fetching for better performance.
+    """
+    cache_key = f"history_opt:{conversation_id}"
+    
+    # Try to get from Redis cache first
+    cached_history = REDIS_CLIENT.get(cache_key)
+    if cached_history:
+        # Ensure properly decoded string for JSON loading
+        if isinstance(cached_history, bytes):
+            cached_history = cached_history.decode('utf-8')
+        elif not isinstance(cached_history, str):
+            cached_history = str(cached_history)
+        try:
+            return json.loads(cached_history)
+        except:
+            # If cache parsing fails, proceed to fetch from database
+            pass
+    
+    # Fetch from database using a more efficient query
+    # Use a single query with ORDER BY and LIMIT
+    query = """
+    SELECT role, content 
+    FROM conversation_messages 
+    WHERE conversation_id = $1 
+    ORDER BY message_index ASC 
+    LIMIT $2
+    """
+    
+    messages = await db_fetch_all_async(query, (conversation_id, max_messages))
+    
+    # Format messages for return
+    history = [{"role": msg["role"], "content": msg["content"]} for msg in messages]
+    
+    # Cache the result with a TTL
+    try:
+        REDIS_CLIENT.set(
+            cache_key, 
+            json.dumps(history),
+            ex=600  # 10 minute cache
+        )
+    except Exception as e:
+        logger.warning(f"Failed to cache conversation history: {e}")
+    
     return history

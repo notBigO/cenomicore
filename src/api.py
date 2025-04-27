@@ -10,7 +10,7 @@ from utils import (
     detect_language, get_or_create_conversation, db_fetch_all_async, 
     get_conversation_history, add_message_to_conversation, db_fetch_one_async, 
     db_execute_async, DateTimeEncoder, logger, get_db_pool, REDIS_CLIENT,
-    Message
+    Message, get_history_cached
 )
 from customer import CustomerState, customer_graph
 from tenant import TenantState, tenant_graph
@@ -21,6 +21,8 @@ import os
 from customer import populate_knowledge_graph
 import uuid
 from io import BytesIO
+import functools
+import concurrent.futures
 
 app = FastAPI()
 app.add_middleware(
@@ -34,6 +36,9 @@ app.add_middleware(
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 if not ELEVENLABS_API_KEY:
     raise ValueError("ELEVENLABS_API_KEY environment variable is not set")
+
+# Thread pool for CPU-bound tasks
+thread_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
 @app.on_event("startup")
 async def startup_event():
@@ -76,7 +81,14 @@ class TTSRequest(BaseModel):
     text: str
     language: str = "en"
 
+# Cache TTS responses
+TTS_CACHE = {}
+
 async def generate_speech(text: str, language: str = "en") -> bytes:
+    cache_key = f"{text}:{language}"
+    if cache_key in TTS_CACHE:
+        return TTS_CACHE[cache_key]
+    
     url = "https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM"
     headers = {
         "xi-api-key": ELEVENLABS_API_KEY,
@@ -87,10 +99,26 @@ async def generate_speech(text: str, language: str = "en") -> bytes:
         "model_id": "eleven_monolingual_v1" if language == "en" else "eleven_multilingual_v2",
         "voice_settings": {"stability": 0.5, "similarity_boost": 0.5}
     }
+    
+    def _make_request():
+        try:
+            response = requests.post(url, headers=headers, json=data)
+            response.raise_for_status()
+            return response.content
+        except Exception as e:
+            logger.error(f"TTS generation failed: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"TTS generation failed: {str(e)}")
+    
     try:
-        response = requests.post(url, headers=headers, json=data)
-        response.raise_for_status()
-        return response.content
+        audio_data = await asyncio.to_thread(_make_request)
+        # Cache the result
+        TTS_CACHE[cache_key] = audio_data
+        # Limit cache size
+        if len(TTS_CACHE) > 100:
+            # Remove oldest items
+            for k in list(TTS_CACHE.keys())[:10]:
+                TTS_CACHE.pop(k, None)
+        return audio_data
     except Exception as e:
         logger.error(f"TTS generation failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"TTS generation failed: {str(e)}")
@@ -189,14 +217,31 @@ async def chat(request: ChatRequest):
     try:
         text = request.text or ""
         
-        language = request.language or detect_language(text) or "en"
-        conversation_id = await get_or_create_conversation(request.conversation_id, request.user_id, language)
-        history = await get_history(conversation_id)
-
-        conv_data = await db_fetch_one_async(
+        # Determine language asynchronously
+        language = request.language
+        if not language:
+            def detect_lang():
+                try:
+                    return detect_language(text) or "en"
+                except:
+                    return "en"
+            language = await asyncio.to_thread(detect_lang)
+        
+        # Create or get conversation
+        conversation_task = get_or_create_conversation(request.conversation_id, request.user_id, language)
+        
+        # These tasks can run in parallel
+        conversation_id = await conversation_task
+        
+        # Get history and metadata concurrently
+        history_task = get_history_cached(conversation_id)
+        conv_data_task = db_fetch_one_async(
             "SELECT meta_data FROM conversations WHERE id = $1",
             (conversation_id,)
         )
+        
+        history, conv_data = await asyncio.gather(history_task, conv_data_task)
+        
         state_data = {}
         if conv_data and conv_data.get("meta_data"):
             meta_data = json.loads(conv_data["meta_data"])
@@ -216,27 +261,42 @@ async def chat(request: ChatRequest):
             **state_data
         )
 
+        # Process the request through the graph
         with trace(name="CustomerChat", inputs={"query": text, "user_id": request.user_id, "mall_id": request.mall_id}):
             result = await customer_graph.ainvoke(state)
 
-        await add_message(conversation_id, "user", text)
-        await add_message(conversation_id, "assistant", result["response"])
-
+        # Update the conversation with new messages
+        tasks = [
+            add_message(conversation_id, "user", text),
+            add_message(conversation_id, "assistant", result["response"])
+        ]
+        
+        # If TTS is requested, generate it in parallel
+        audio_task = None
+        if request.include_tts and result["response"]:
+            audio_task = generate_speech(result["response"], language)
+        
+        # Update history
         updated_history = history + [
             {"role": "user", "content": text},
             {"role": "assistant", "content": result["response"]}
         ]
         result["conversation_history"] = updated_history
 
+        # Update metadata
         meta_data = {"language": language, "state": result}
-        await db_execute_async(
+        update_meta_task = db_execute_async(
             "UPDATE conversations SET meta_data = $1 WHERE id = $2",
             (json.dumps(meta_data, cls=DateTimeEncoder), conversation_id)
         )
+        
+        tasks.append(update_meta_task)
+        await asyncio.gather(*tasks)
 
+        # Get TTS result if requested
         audio_base64 = None
-        if request.include_tts and result["response"]:
-            audio_data = await generate_speech(result["response"], language)
+        if audio_task:
+            audio_data = await audio_task
             audio_base64 = base64.b64encode(audio_data).decode("utf-8")
 
         return ChatResponse(
@@ -311,13 +371,17 @@ async def tenant_update(request: UpdateRequest):
     
     meta_data = {"language": lang, "state": result}
     meta_data_json = json.dumps(meta_data, cls=DateTimeEncoder)
-    await db_execute_async(
-        "UPDATE conversations SET meta_data = $1 WHERE id = $2",
-        (meta_data_json, conversation_id)
-    )
     
-    await add_message(conversation_id, "user", request.text)
-    await add_message(conversation_id, "assistant", result["response"])
+    # Perform these operations concurrently
+    tasks = [
+        db_execute_async(
+            "UPDATE conversations SET meta_data = $1 WHERE id = $2",
+            (meta_data_json, conversation_id)
+        ),
+        add_message(conversation_id, "user", request.text),
+        add_message(conversation_id, "assistant", result["response"]),
+    ]
+    await asyncio.gather(*tasks)
 
     await asyncio.to_thread(REDIS_CLIENT.delete, f"history:{conversation_id}")
     
@@ -329,5 +393,23 @@ async def root():
 
 @app.get("/malls")
 async def get_malls():
+    # Use Redis cache for mall list
+    malls_cache = REDIS_CLIENT.get("malls:list")
+    if malls_cache:
+        try:
+            if isinstance(malls_cache, bytes):
+                malls_cache = malls_cache.decode('utf-8')
+            elif not isinstance(malls_cache, str):
+                # Convert to string if it's neither bytes nor string
+                malls_cache = str(malls_cache)
+            return json.loads(malls_cache)
+        except:
+            # If there's an error with the cache, proceed to fetch from DB
+            pass
+    
     malls = await db_fetch_all_async("SELECT unique_property_id as mall_id, marketing_name as name_en FROM malls")
-    return [{"mall_id": str(mall["mall_id"]), "name_en": mall["name_en"]} for mall in malls]
+    result = [{"mall_id": str(mall["mall_id"]), "name_en": mall["name_en"]} for mall in malls]
+    
+    # Cache mall list for 1 hour
+    REDIS_CLIENT.set("malls:list", json.dumps(result), ex=3600)
+    return result
