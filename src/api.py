@@ -105,7 +105,13 @@ async def generate_speech(text: str, language: str = "en") -> bytes:
             return redis_cached
     
     # Cache miss - generate new audio
-    url = "https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM"
+    # Use different voices for different languages
+    voice_id = "21m00Tcm4TlvDq8ikWAM"  # Default English voice (Rachel)
+    
+    if language == "ar":
+        voice_id = "jsCqWAovK2LkecY7zXl4"  # Arabic voice (Salma)
+    
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     headers = {
         "xi-api-key": ELEVENLABS_API_KEY,
         "Content-Type": "application/json",

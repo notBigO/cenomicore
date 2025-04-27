@@ -1495,7 +1495,10 @@ async def refine_context(state: CustomerState) -> CustomerState:
 # Add back the generate_response function with conversation tracking
 async def generate_response(state: CustomerState) -> CustomerState:
     if not state.mall_id:
-        state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
+        if state.language == "ar":
+            state.response = "عذراً! أحتاج إلى معرفة المركز التجاري الذي تسأل عنه. يرجى اختيار مركز تجاري أولاً! 😊"
+        else:
+            state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
         return state
 
     formatted_history = "\n".join([f"{msg['role'].upper()}: {msg['content']}" for msg in state.conversation_history[-6:]]) if state.conversation_history else "No prior conversation."
@@ -1516,7 +1519,14 @@ async def generate_response(state: CustomerState) -> CustomerState:
             # This is a simple check - the NLP model should do the heavy lifting
             common_types = ["italian", "indian", "chinese", "fast food", "sports", "casual", 
                            "formal", "kids", "women", "men", "luxury", "budget", "electronics"]
-            for type_name in common_types:
+            
+            # Add Arabic common types
+            arabic_common_types = ["إيطالي", "هندي", "صيني", "وجبات سريعة", "رياضة", "غير رسمي", 
+                                  "رسمي", "أطفال", "نساء", "رجال", "فاخر", "اقتصادي", "إلكترونيات"]
+            
+            all_types = common_types + arabic_common_types
+            
+            for type_name in all_types:
                 if type_name.lower() in last_message["content"].lower():
                     state.type_preference = type_name
                     state.needs_type_follow_up = False
@@ -1540,7 +1550,7 @@ async def generate_response(state: CustomerState) -> CustomerState:
         state.conversation_topic = current_topic
         state.topic_turn_count = 1
     
-    logger.info(f"Conversation topic: {state.conversation_topic}, Turn count: {state.topic_turn_count}")
+    logger.info(f"Conversation topic: {state.conversation_topic}, Turn count: {state.topic_turn_count}, Language: {state.language}")
     
     try:
         response = await asyncio.to_thread(
@@ -1563,20 +1573,30 @@ async def generate_response(state: CustomerState) -> CustomerState:
             # Add a note about the progressive nature of the conversation
             if state.topic_turn_count >= 3:
                 # After 3 turns, we should finalize the plan/itinerary
-                if "plan" not in response.lower() and "itinerary" not in response.lower():
-                    response += "\n\nI've put together this visit plan based on your preferences. Enjoy your visit to the mall!"
+                if state.language == "ar":
+                    if "خطة" not in response.lower() and "جدول" not in response.lower():
+                        response += "\n\nلقد وضعت خطة زيارة بناءً على تفضيلاتك. استمتع بزيارتك للمركز التجاري!"
+                else:
+                    if "plan" not in response.lower() and "itinerary" not in response.lower():
+                        response += "\n\nI've put together this visit plan based on your preferences. Enjoy your visit to the mall!"
             
         state.response = response
     except Exception as e:
         logger.error(f"Error generating response: {e}")
-        state.response = "I'm having trouble processing your request right now. Please try again."
+        if state.language == "ar":
+            state.response = "أواجه مشكلة في معالجة طلبك حاليًا. يرجى المحاولة مرة أخرى."
+        else:
+            state.response = "I'm having trouble processing your request right now. Please try again."
     
     return state
 
 # Add back the initial_retrieval function needed by retrieve_fallback_context
 async def initial_retrieval(state: CustomerState) -> CustomerState:
     if not state.mall_id:
-        state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
+        if state.language == "ar":
+            state.response = "عذراً! أحتاج إلى معرفة المركز التجاري الذي تسأل عنه. يرجى اختيار مركز تجاري أولاً! 😊"
+        else:
+            state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
         return state
 
     cache_key = f"initial_context:{state.query}:{state.intent}:{state.user_id or 'anon'}:{state.mall_id}"
