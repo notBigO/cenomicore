@@ -68,6 +68,9 @@ class ChatResponse(BaseModel):
     message: str
     conversation_id: str
     audio_base64: Optional[str] = None
+    recommendations: Optional[List[Dict[str, str]]] = None
+    is_recommendation_format: bool = False
+    follow_up_question: Optional[str] = None
 
 class UpdateRequest(BaseModel):
     text: str
@@ -237,10 +240,14 @@ async def chat(request: ChatRequest):
     try:
         text = request.text or ""
         
+        # Log the request data
+        logger.info(f"CHAT REQUEST: {json.dumps(request.dict(), default=str)}")
+        
         # Use request-based caching for identical recent requests
         cache_key = f"chat:{hash(json.dumps(request.dict(), sort_keys=True))}"
         cached_response = get_memory_cache(cache_key)
         if cached_response:
+            logger.info(f"CHAT RESPONSE (cached): {json.dumps(cached_response, default=str)}")
             return ChatResponse(**cached_response)
         
         # Determine language asynchronously
@@ -315,6 +322,17 @@ async def chat(request: ChatRequest):
             "audio_base64": None
         }
         
+        # Add recommendation formatting if available
+        if "response_format" in result and result["response_format"]:
+            response_format = result["response_format"]
+            if isinstance(response_format, dict):
+                if "recommendations" in response_format:
+                    response_data["recommendations"] = response_format["recommendations"]
+                if "is_recommendation_format" in response_format:
+                    response_data["is_recommendation_format"] = response_format["is_recommendation_format"]
+                if "follow_up_question" in response_format:
+                    response_data["follow_up_question"] = response_format["follow_up_question"]
+        
         # Update the conversation with new messages and metadata
         tasks = [
             add_message(conversation_id, "user", text),
@@ -327,6 +345,19 @@ async def chat(request: ChatRequest):
             {"role": "assistant", "content": result["response"]}
         ]
         result["conversation_history"] = updated_history
+        
+        # Ensure response_format is serializable before storing in metadata
+        if "response_format" in result and result["response_format"] is not None:
+            if not isinstance(result["response_format"], dict):
+                # Convert to dict if it's not already (handles Pydantic object)
+                try:
+                    result["response_format"] = dict(result["response_format"])
+                except (TypeError, ValueError):
+                    # If conversion fails, create a basic dict
+                    result["response_format"] = {
+                        "response": result["response"],
+                        "is_recommendation_format": False
+                    }
 
         # Update metadata
         meta_data = {"language": language, "state": result}
@@ -348,6 +379,12 @@ async def chat(request: ChatRequest):
         
         # Cache the response for identical requests (short TTL)
         set_memory_cache(cache_key, response_data, ttl=SHORT_CACHE_TTL)
+        
+        # Log the response data (excluding large audio_base64 field)
+        log_response = response_data.copy()
+        if "audio_base64" in log_response:
+            log_response["audio_base64"] = "[TRUNCATED]" if log_response["audio_base64"] else None
+        logger.info(f"CHAT RESPONSE: {json.dumps(log_response, default=str)}")
         
         return ChatResponse(**response_data)
     except Exception as e:

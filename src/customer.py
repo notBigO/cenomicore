@@ -1,5 +1,6 @@
-from typing import Optional, List, Dict, Any
-from pydantic import BaseModel as PydanticBaseModel
+from typing import Optional, List, Dict, Any, Union
+from pydantic import BaseModel as PydanticBaseModel, Field
+from pydantic.json import pydantic_encoder
 from langchain_core.prompts import PromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.output_parsers import StrOutputParser
@@ -184,6 +185,7 @@ intent_classification_prompt = PromptTemplate(
     - For broad queries (e.g., "What's good here?"), assume 'recommend' or 'list' based on context.
     - For loyalty-related queries, identify if the user is asking about their points balance or the programs they are enrolled in.
     - Extract specific details (e.g., store name) into collected_data.
+    - Remember that store locations are stored in "pms_unit_codes", not "address"
 
     Return a JSON object with:
     - entity_type: What they're asking about (store, offer, product, etc., or loyalty)
@@ -206,11 +208,11 @@ customer_prompt = PromptTemplate(
     You are CenomiAI — a mall assistant at {mall_name}, designed to help shoppers find information, plan visits, and discover stores, offers, and events.
 
     # Response Style
-    - Be concise and conversational, like a helpful friend who knows the mall well
-    - Keep responses focused on one main point with 1-3 short sentences
-    - Use precise details when available (store locations, hours, prices)
-    - Always provide locations in clear terms (Floor, section, nearby landmarks)
-    - End each response with a relevant follow-up suggestion related to the user's query
+    - Be concise, friendly and conversational, as if you're a helpful friend who knows the mall well
+    - Keep responses very short - typically 1-3 sentences maximum
+    - When listing items (stores, products, offers), ALWAYS limit to a maximum of 3 results
+    - Use bullet points for lists to improve readability
+    - Responses should feel natural in both text and voice formats - imagine someone listening to your response
 
     # Location Format Rules
     - NEVER include raw location codes like "FF", "GF", "BSW" in your responses
@@ -224,6 +226,9 @@ customer_prompt = PromptTemplate(
     - Example: Instead of "FF08", say "First Floor, Shop #8"
     - Example: Instead of "GF12", say "Ground Floor, Shop #12"
     - If you see numbers after location codes, treat them as shop numbers
+    - For store locations, use "pms_unit_codes" field, NOT "address"
+    - For mall addresses, use "address_en" or "address_ar" based on the language
+    - Mall address information is inside "mall_information.MallContact.Address1En" and "Address2En"
 
     # Conversation Context
     {conversation_history}
@@ -232,41 +237,54 @@ customer_prompt = PromptTemplate(
     Current topic: {conversation_topic}
     Turn count on this topic: {topic_turn_count}
     
-    # Follow-up Suggestions
-    - For store queries: Suggest directions, similar stores, or current offers
-    - For product queries: Suggest filtering by price, brand, or viewing similar items
-    - For mall info: Suggest other useful information (parking, operating hours)
-    - For events/offers: Suggest filtering by category or time period
-    - For family visits: Suggest kid-friendly options or services
-
-    # Information to Include
-    - Store details: Location (floor/section), category, and brief description
-    - Product info: Price, availability, store location
-    - Offers: Discount amount, conditions, validity period
-    - Events: Location, timing, any special instructions
-    - Services: Location, availability, requirements
+    # Follow-up Question Control (STRICTLY FOLLOW THIS)
+    - If topic_turn_count = 1: Ask ONE follow-up question to refine information
+    - If topic_turn_count >= 2: DO NOT ask follow-up questions - respond with finality
+    - NEVER ask more than one follow-up question in a response
+    - After the first exchange on a topic, your goal is to conclude the topic naturally
+    
+    # Response Structure
+    - For turn 1: Provide information and ask ONE relevant follow-up question
+    - For turn 2+: Provide final information without any further questions
+    - Keep all responses brief and to-the-point regardless of turn count
+    - For turn 2+, end with a brief closing statement like "Enjoy your visit!" or "Hope that helps!"
 
     # Mall Database Information
     {context}
 
-    # Response Structure
-    1. Answer the user's question directly with specific details
-    2. Add one relevant piece of helpful context if available
-    3. If this is turn 1 or 2 on a topic: End with ONE natural follow-up option
-    4. If this is turn 3 or more: End with a closing message without follow-up questions, like "Enjoy your visit!" or "Hope that helps with your shopping!"
-
-    # Multi-turn Conversation Handling
-    - For family planning queries: If this is turn 2+, start building a cohesive plan based on previous responses
-    - For visit planning queries: If this is turn 2+, refine suggestions based on the user's preferences
-    - For product queries: If this is turn 2+, provide more specific recommendations
-
     User Query: {query}
     
-    Respond in {lang} in a friendly, conversational tone:
+    Respond in {lang} in a friendly, conversational tone. Your response should be structured to work well for both text and voice:
+    
+    1. Direct answer with only the most important details (1-3 bullets if listing items)
+    2. For turn 1 only: ONE simple follow-up question
+    3. For turn 2+: Brief, friendly closing (no questions)
     """
 )
 
 customer_chain = customer_prompt | llm | StrOutputParser()
+
+# Response format class
+class ResponseFormat(PydanticBaseModel):
+    response: str
+    recommendations: Optional[List[Dict[str, str]]] = Field(default=None)
+    is_recommendation_format: bool = Field(default=False)
+    follow_up_question: Optional[str] = Field(default=None)
+    
+    def dict(self, *args, **kwargs):
+        """Override dict method to ensure fields are properly serialized"""
+        return {
+            "response": self.response,
+            "recommendations": self.recommendations,
+            "is_recommendation_format": self.is_recommendation_format,
+            "follow_up_question": self.follow_up_question
+        }
+    
+    class Config:
+        """Pydantic config"""
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
 
 class CustomerState(PydanticBaseModel):
     query: str
@@ -286,6 +304,7 @@ class CustomerState(PydanticBaseModel):
     query_type: Optional[str] = None  # Added field for high-level query classification
     conversation_topic: Optional[str] = None  # Track current conversation topic
     topic_turn_count: int = 0  # Track number of turns on current topic
+    response_format: Optional[Union[ResponseFormat, Dict[str, Any]]] = None  # Store formatted response as object or dict
 
 # Add the new node for high-level query classification
 async def classify_query_type(state: CustomerState) -> CustomerState:
@@ -430,26 +449,85 @@ async def retrieve_mall_context(state: CustomerState) -> CustomerState:
     # For mall info, we focus on amenities, directions, hours, and general mall data
     mall_query_vector = embeddings.embed_query(f"mall information {state.query}")
     
-    # Get mall information directly from database
+    # Get mall information directly from database with the correct fields
     mall_info = await db_fetch_one_async(
-        """SELECT marketing_name, address, description, opening_hours, map_url, contact_info 
+        """SELECT marketing_name, marketing_name_ar, city, country, mall_information, gps_coordinates
         FROM malls WHERE unique_property_id = $1""",
         (state.mall_id,)
     )
     
+    state.initial_context = []
+    
     if mall_info:
+        # Extract address information from the mall_information JSON field
+        address_en = None
+        address_ar = None
+        contact_phone = None
+        contact_email = None
+        opening_hours = []
+        mall_description_en = None
+        mall_description_ar = None
+        map_url = None
+        
+        if mall_info.get("mall_information"):
+            try:
+                mall_data = mall_info["mall_information"]
+                if isinstance(mall_data, str):
+                    mall_data = json.loads(mall_data)
+                
+                # Extract address from MallContact
+                if "MallContact" in mall_data:
+                    contact_data = mall_data["MallContact"]
+                    address_lines_en = []
+                    if contact_data.get("Address1En"):
+                        address_lines_en.append(contact_data["Address1En"])
+                    if contact_data.get("Address2En"):
+                        address_lines_en.append(contact_data["Address2En"])
+                    address_en = ", ".join(address_lines_en)
+                    
+                    address_lines_ar = []
+                    if contact_data.get("Address1Ar"):
+                        address_lines_ar.append(contact_data["Address1Ar"])
+                    if contact_data.get("Address2Ar"):
+                        address_lines_ar.append(contact_data["Address2Ar"])
+                    address_ar = ", ".join(address_lines_ar)
+                    
+                    contact_phone = contact_data.get("Phone")
+                    contact_email = contact_data.get("Email")
+                
+                # Extract opening hours if available
+                if "MallTiming" in mall_data and isinstance(mall_data["MallTiming"], list):
+                    opening_hours = mall_data["MallTiming"]
+                
+                # Extract mall description
+                mall_description_en = mall_data.get("MallDescriptionEn")
+                mall_description_ar = mall_data.get("MallDescriptionAr")
+                
+                # Extract map URL
+                map_url = mall_data.get("GoogleMapURL") or mall_data.get("MallMapEn")
+                
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.error(f"Error processing mall_information JSON: {e}")
+        
         # Create a synthetic context entry for the mall itself
         mall_metadata = {
             "type": "mall",
-            "name": mall_info.get("marketing_name", ""),
-            "address": mall_info.get("address", ""),
-            "description": mall_info.get("description", ""),
-            "opening_hours": mall_info.get("opening_hours", ""),
-            "map_url": mall_info.get("map_url", ""),
-            "contact_info": mall_info.get("contact_info", ""),
+            "name_en": mall_info.get("marketing_name", ""),
+            "name_ar": mall_info.get("marketing_name_ar", ""),
+            "address_en": address_en,
+            "address_ar": address_ar,
+            "city": mall_info.get("city", ""),
+            "country": mall_info.get("country", ""),
+            "description_en": mall_description_en,
+            "description_ar": mall_description_ar,
+            "contact_phone": contact_phone,
+            "contact_email": contact_email,
+            "opening_hours": opening_hours,
+            "map_url": map_url,
+            "gps_coordinates": mall_info.get("gps_coordinates", ""),
             "mall_id": state.mall_id
         }
-        state.initial_context = [{"id": f"mall_{state.mall_id}", "score": 1.0, "metadata": mall_metadata}]
+        state.initial_context.append({"id": f"mall_{state.mall_id}", "score": 1.0, "metadata": mall_metadata})
     
     # Also fetch amenities
     try:
@@ -819,20 +897,78 @@ async def retrieve_visit_planning_context(state: CustomerState) -> CustomerState
     
     # First, get mall information for operating hours and facilities
     mall_info = await db_fetch_one_async(
-        """SELECT marketing_name, description, opening_hours, map_url, contact_info 
+        """SELECT marketing_name, marketing_name_ar, city, country, mall_information, gps_coordinates 
         FROM malls WHERE unique_property_id = $1""",
         (state.mall_id,)
     )
     
     if mall_info:
+        # Extract address information from the mall_information JSON field
+        address_en = None
+        address_ar = None
+        contact_phone = None
+        contact_email = None
+        opening_hours = []
+        mall_description_en = None
+        mall_description_ar = None
+        map_url = None
+        
+        if mall_info.get("mall_information"):
+            try:
+                mall_data = mall_info["mall_information"]
+                if isinstance(mall_data, str):
+                    mall_data = json.loads(mall_data)
+                
+                # Extract address from MallContact
+                if "MallContact" in mall_data:
+                    contact_data = mall_data["MallContact"]
+                    address_lines_en = []
+                    if contact_data.get("Address1En"):
+                        address_lines_en.append(contact_data["Address1En"])
+                    if contact_data.get("Address2En"):
+                        address_lines_en.append(contact_data["Address2En"])
+                    address_en = ", ".join(address_lines_en)
+                    
+                    address_lines_ar = []
+                    if contact_data.get("Address1Ar"):
+                        address_lines_ar.append(contact_data["Address1Ar"])
+                    if contact_data.get("Address2Ar"):
+                        address_lines_ar.append(contact_data["Address2Ar"])
+                    address_ar = ", ".join(address_lines_ar)
+                    
+                    contact_phone = contact_data.get("Phone")
+                    contact_email = contact_data.get("Email")
+                
+                # Extract opening hours if available
+                if "MallTiming" in mall_data and isinstance(mall_data["MallTiming"], list):
+                    opening_hours = mall_data["MallTiming"]
+                
+                # Extract mall description
+                mall_description_en = mall_data.get("MallDescriptionEn")
+                mall_description_ar = mall_data.get("MallDescriptionAr")
+                
+                # Extract map URL
+                map_url = mall_data.get("GoogleMapURL") or mall_data.get("MallMapEn")
+                
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.error(f"Error processing mall_information JSON: {e}")
+        
         # Create a synthetic context entry for the mall itself
         mall_metadata = {
             "type": "mall",
-            "name": mall_info.get("marketing_name", ""),
-            "description": mall_info.get("description", ""),
-            "opening_hours": mall_info.get("opening_hours", ""),
-            "map_url": mall_info.get("map_url", ""),
-            "contact_info": mall_info.get("contact_info", ""),
+            "name_en": mall_info.get("marketing_name", ""),
+            "name_ar": mall_info.get("marketing_name_ar", ""),
+            "address_en": address_en,
+            "address_ar": address_ar,
+            "city": mall_info.get("city", ""),
+            "country": mall_info.get("country", ""),
+            "description_en": mall_description_en,
+            "description_ar": mall_description_ar,
+            "contact_phone": contact_phone,
+            "contact_email": contact_email,
+            "opening_hours": opening_hours,
+            "map_url": map_url,
+            "gps_coordinates": mall_info.get("gps_coordinates", ""),
             "mall_id": state.mall_id
         }
         state.initial_context.append({"id": f"mall_{state.mall_id}", "score": 1.0, "metadata": mall_metadata})
@@ -1467,26 +1603,45 @@ async def refine_context(state: CustomerState) -> CustomerState:
     context["category_types"]["product"] = sorted(list(context["category_types"]["product"]))
     context["category_types"]["store"] = sorted(list(context["category_types"]["store"]))
 
+    # Check for any "address" requests and map them to pms_unit_codes
+    if state.query.lower().find("address") > -1 or state.query.lower().find("location") > -1 or state.query.lower().find("where") > -1:
+        for store in context["stores"]:
+            # Make sure we use pms_unit_codes for location information
+            if "pms_unit_codes" in store and not "location" in store:
+                store["location"] = store["pms_unit_codes"]
+    
     # At the end, preprocess all location codes to readable format
     # Process store locations
     for store in context["stores"]:
         if "location" in store:
             store["location"] = convert_location_codes(store["location"])
+        # Also check for pms_unit_codes if location is not present
+        elif "pms_unit_codes" in store:
+            store["location"] = convert_location_codes(store["pms_unit_codes"])
     
     # Process product locations via store
     for product in context["products"]:
         if "location" in product:
             product["location"] = convert_location_codes(product["location"])
+        # Also check for pms_unit_codes if location is not present
+        elif "pms_unit_codes" in product:
+            product["location"] = convert_location_codes(product["pms_unit_codes"])
     
     # Process service locations
     for service in context["services"]:
         if "location" in service:
             service["location"] = convert_location_codes(service["location"])
+        # Also check for pms_unit_codes if location is not present
+        elif "pms_unit_codes" in service:
+            service["location"] = convert_location_codes(service["pms_unit_codes"])
     
     # Process neighboring stores locations
     for store in context["neighboring_stores"]:
         if "location" in store:
             store["location"] = convert_location_codes(store["location"])
+        # Also check for pms_unit_codes if location is not present
+        elif "pms_unit_codes" in store:
+            store["location"] = convert_location_codes(store["pms_unit_codes"])
 
     state.context_data = context
     state.response = json.dumps(convert_to_json_safe(context))
@@ -1550,7 +1705,8 @@ async def generate_response(state: CustomerState) -> CustomerState:
         state.conversation_topic = current_topic
         state.topic_turn_count = 1
     
-    logger.info(f"Conversation topic: {state.conversation_topic}, Turn count: {state.topic_turn_count}, Language: {state.language}")
+    # Log conversation state for debugging
+    logger.info(f"CONVERSATION STATE: Topic: {state.conversation_topic}, Turn count: {state.topic_turn_count}, Intent: {state.intent}, Query type: {state.query_type}")
     
     try:
         response = await asyncio.to_thread(
@@ -1567,20 +1723,73 @@ async def generate_response(state: CustomerState) -> CustomerState:
             }
         )
         
-        # For family planning and visit planning queries that are follow-ups,
-        # we should progressively build an itinerary/plan
-        if state.query_type in ["family_planning_query", "visit_planning_query"] and state.topic_turn_count > 1:
-            # Add a note about the progressive nature of the conversation
-            if state.topic_turn_count >= 3:
-                # After 3 turns, we should finalize the plan/itinerary
-                if state.language == "ar":
-                    if "خطة" not in response.lower() and "جدول" not in response.lower():
-                        response += "\n\nلقد وضعت خطة زيارة بناءً على تفضيلاتك. استمتع بزيارتك للمركز التجاري!"
-                else:
-                    if "plan" not in response.lower() and "itinerary" not in response.lower():
-                        response += "\n\nI've put together this visit plan based on your preferences. Enjoy your visit to the mall!"
+        # Check if this is a product listing, store listing, or offer listing
+        # If so, format the response as recommendations
+        needs_recommendation_format = False
+        recommendations = []
+        follow_up_question = None
+        
+        # Determine if we need to format as a recommendation list
+        if state.intent and state.intent in ["product_list", "store_list", "offer_list", "product_recommend", "store_recommend", "offer_recommend"]:
+            needs_recommendation_format = True
             
+            # Extract recommendations and follow-up question from the response
+            # Parse bullet points or numbered lists
+            lines = response.split('\n')
+            content_lines = []
+            question_line = None
+            
+            for line in lines:
+                stripped = line.strip()
+                # Check if line is a follow-up question
+                if stripped and (stripped.endswith('?') or '?' in stripped):
+                    question_line = stripped
+                # Check if line is a recommendation (bullet point or numbered item)
+                elif stripped and (stripped.startswith('•') or stripped.startswith('-') or 
+                                 stripped.startswith('*') or 
+                                 (len(stripped) > 2 and stripped[0].isdigit() and stripped[1] in ['.', ')'])):
+                    content_lines.append(stripped)
+                elif stripped:
+                    content_lines.append(stripped)
+            
+            # Convert to recommendation format
+            if content_lines:
+                # Parse up to 3 recommendations
+                for i, line in enumerate(content_lines[:3]):
+                    # Remove bullet point or number prefix
+                    if line.startswith(('•', '-', '*')):
+                        clean_line = line[1:].strip()
+                    elif len(line) > 2 and line[0].isdigit() and line[1] in ['.', ')']:
+                        clean_line = line[2:].strip()
+                    else:
+                        clean_line = line.strip()
+                    
+                    # Split into title and description if possible
+                    if ':' in clean_line:
+                        title, desc = clean_line.split(':', 1)
+                        recommendations.append({"title": title.strip(), "description": desc.strip()})
+                    else:
+                        recommendations.append({"title": clean_line, "description": ""})
+            
+            follow_up_question = question_line
+            
+            # If this is turn 2+, remove follow-up question to respect turn logic
+            if state.topic_turn_count >= 2 and follow_up_question:
+                logger.info(f"REMOVING FOLLOW-UP QUESTION (turn {state.topic_turn_count}): {follow_up_question}")
+                follow_up_question = None
+        
+        # Create formatted response
+        response_format = ResponseFormat(
+            response=response,
+            recommendations=recommendations if needs_recommendation_format else None,
+            is_recommendation_format=needs_recommendation_format,
+            follow_up_question=follow_up_question
+        )
+        
+        # Store the response format as a serializable dictionary
+        state.response_format = response_format.dict()
         state.response = response
+        
     except Exception as e:
         logger.error(f"Error generating response: {e}")
         if state.language == "ar":
@@ -1627,8 +1836,8 @@ async def initial_retrieval(state: CustomerState) -> CustomerState:
         "amenity_navigate": "amenity",
         "amenity_list": "amenity",
     }
-    entity_type = state.intent.split("_")[0]
-    query_prefix = intent_prefixes.get(state.intent, entity_type)
+    entity_type = state.intent.split("_")[0] if state.intent else "general"
+    query_prefix = intent_prefixes.get(state.intent, entity_type) if state.intent else "general"
 
     # Extract store name or category
     store_name, category = None, None
@@ -1689,6 +1898,16 @@ async def initial_retrieval(state: CustomerState) -> CustomerState:
     except Exception as e:
         logger.error(f"Pinecone query error: {e}")
         state.initial_context = []
+    
+    # Process any location codes before returning
+    if state.initial_context:
+        for item in state.initial_context:
+            if "metadata" in item and item["metadata"]:
+                # Check for locations in any of the expected fields
+                if "pms_unit_codes" in item["metadata"]:
+                    item["metadata"]["location"] = convert_location_codes(item["metadata"]["pms_unit_codes"])
+                elif "location" in item["metadata"]:
+                    item["metadata"]["location"] = convert_location_codes(item["metadata"]["location"])
     
     REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
     return state
