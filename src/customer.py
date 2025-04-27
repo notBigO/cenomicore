@@ -14,6 +14,7 @@ from utils import db_fetch_all_async, db_fetch_one_async, convert_to_json_safe, 
 import networkx as nx
 import spacy
 from langchain_openai import ChatOpenAI
+import re
 
 
 # Load spaCy NLP model for store name and category extraction
@@ -210,6 +211,8 @@ customer_prompt = PromptTemplate(
     - Keep responses focused on one main point with 1-3 short sentences
     - Use precise details when available (store locations, hours, prices)
     - Always provide locations in clear terms (Floor, section, nearby landmarks)
+    - For lists of stores/shops, present them in a single sentence with numerical ordering (1. Store A, 2. Store B, 3. Store C) with minimal details (just name and location)
+    - Only provide store details if specifically requested for a particular store
     - End each response with a relevant follow-up suggestion related to the user's query
 
     # Location Format Rules
@@ -245,6 +248,13 @@ customer_prompt = PromptTemplate(
     - Offers: Discount amount, conditions, validity period
     - Events: Location, timing, any special instructions
     - Services: Location, availability, requirements
+
+    # Response Formats
+    - When listing multiple stores: Use a single sentence with numerical ordering (1. Store A at First Floor, 2. Store B at Ground Floor, 3. Store C at Second Floor)
+    - For detailed information about a specific store: Provide complete details in a concise format
+    - For family activity suggestions: Provide up to 3 specific activities that are suitable for families
+    - For vague queries about planning with family: Suggest 3 general activities families can do together at the mall
+    - If unable to process or find relevant information, respond with "I don't have that information available right now." instead of an error message
 
     # Mall Database Information
     {context}
@@ -627,178 +637,260 @@ async def retrieve_family_planning_context(state: CustomerState) -> CustomerStat
     kid_friendly_categories = ["toys", "kids", "children", "baby", "family", "play", "games"]
     food_family_keywords = ["family meal", "kids menu", "children menu", "play area"]
     
-    # Get mall information for operating hours and facilities
-    mall_info = await db_fetch_one_async(
-        """SELECT marketing_name, description, opening_hours, map_url, contact_info 
-        FROM malls WHERE unique_property_id = $1""",
-        (state.mall_id,)
-    )
-    
-    if mall_info:
-        # Create a synthetic context entry for the mall itself with family focus
-        mall_metadata = {
-            "type": "mall",
-            "name": mall_info.get("marketing_name", ""),
-            "description": mall_info.get("description", ""),
-            "opening_hours": mall_info.get("opening_hours", ""),
-            "map_url": mall_info.get("map_url", ""),
-            "contact_info": mall_info.get("contact_info", ""),
-            "mall_id": state.mall_id
-        }
-        state.initial_context.append({"id": f"mall_{state.mall_id}", "score": 1.0, "metadata": mall_metadata})
-    
-    # Fetch family-friendly stores
-    all_stores = await db_fetch_all_async(
-        """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
-           b.pms_unit_codes
-           FROM brands b 
-           JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
-           WHERE bma.unique_property_id = $1""", 
-        (state.mall_id,)
-    )
-    
-    for store in all_stores:
-        category = store.get("category_name", "").lower()
-        description = store.get("description_en", "").lower() if store.get("description_en") else ""
+    try:
+        # Get mall information for operating hours and facilities
+        mall_info = await db_fetch_one_async(
+            """SELECT marketing_name, mall_information, opening_hours, 
+            map_url, contact_info 
+            FROM malls WHERE unique_property_id = $1""",
+            (state.mall_id,)
+        )
         
-        # Check if this is a kid-friendly store based on category or description
-        is_kid_friendly = any(kid_term in category for kid_term in kid_friendly_categories) or \
-                          any(kid_term in description for kid_term in kid_friendly_categories)
-        
-        if is_kid_friendly:
-            metadata = {
-                "type": "store",
-                "name_en": store["brand_name_en"],
-                "category_en": category,
-                "description_en": description,
-                "brand_id": store["brand_id"],
-                "location": store.get("pms_unit_codes", {}),
-                "mall_id": state.mall_id,
-                "is_kid_friendly": True
+        if mall_info:
+            # Create a synthetic context entry for the mall itself with family focus
+            mall_description = ""
+            if mall_info.get("mall_information") and isinstance(mall_info.get("mall_information"), dict):
+                mall_description = mall_info.get("mall_information").get("description_en", "")
+            
+            mall_metadata = {
+                "type": "mall",
+                "name": mall_info.get("marketing_name", ""),
+                "description": mall_description,
+                "opening_hours": mall_info.get("opening_hours", ""),
+                "map_url": mall_info.get("map_url", ""),
+                "contact_info": mall_info.get("contact_info", ""),
+                "mall_id": state.mall_id
             }
-            state.initial_context.append({
-                "id": f"brand_{store['brand_id']}",
-                "score": 0.95,
-                "metadata": metadata
-            })
-    
-    # Fetch family-friendly restaurants
-    restaurants = await db_fetch_all_async(
-        """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
-           b.pms_unit_codes
-           FROM brands b 
-           JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
-           WHERE bma.unique_property_id = $1 AND 
-           (LOWER(b.category_name) LIKE '%restaurant%' OR 
-            LOWER(b.category_name) LIKE '%food%' OR 
-            LOWER(b.category_name) LIKE '%cafe%' OR
-            LOWER(b.category_name) LIKE '%dining%')""", 
-        (state.mall_id,)
-    )
-    
-    for restaurant in restaurants:
-        description = restaurant.get("description_en", "").lower() if restaurant.get("description_en") else ""
+            state.initial_context.append({"id": f"mall_{state.mall_id}", "score": 1.0, "metadata": mall_metadata})
         
-        # Check if this is a family-friendly restaurant
-        is_family_friendly = any(term in description for term in food_family_keywords)
+        # Fetch family-friendly stores
+        all_stores = await db_fetch_all_async(
+            """SELECT b.brand_id, b.brand_name_en, b.category_name, 
+               b.description_en, b.pms_unit_codes
+               FROM brands b 
+               JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+               WHERE bma.unique_property_id = $1""", 
+            (state.mall_id,)
+        )
         
-        if is_family_friendly:
-            metadata = {
-                "type": "store",
-                "name_en": restaurant["brand_name_en"],
-                "category_en": restaurant.get("category_name", ""),
-                "description_en": description,
-                "brand_id": restaurant["brand_id"],
-                "location": restaurant.get("pms_unit_codes", {}),
-                "mall_id": state.mall_id,
-                "is_family_friendly": True
-            }
-            state.initial_context.append({
-                "id": f"restaurant_{restaurant['brand_id']}",
-                "score": 0.9,
-                "metadata": metadata
-            })
-    
-    # Fetch family-oriented events and offers
-    engagements = await db_fetch_all_async(
-        """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
-           e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, b.brand_name_en
-           FROM engagements e 
-           LEFT JOIN brands b ON e.brand_id = b.brand_id
-           WHERE e.unique_property_id = $1""",
-        (state.mall_id,)
-    )
-    
-    for engagement in engagements:
-        title = engagement.get("title_en", "").lower()
-        description = engagement.get("description_en", "").lower()
+        for store in all_stores:
+            category = store.get("category_name", "").lower() if store.get("category_name") else ""
+            description = store.get("description_en", "").lower() if store.get("description_en") else ""
+            
+            # Check if this is a kid-friendly store based on category or description
+            is_kid_friendly = any(kid_term in category for kid_term in kid_friendly_categories) or \
+                            any(kid_term in description for kid_term in kid_friendly_categories)
+            
+            if is_kid_friendly:
+                metadata = {
+                    "type": "store",
+                    "name_en": store.get("brand_name_en", ""),
+                    "category_en": category,
+                    "description_en": description,
+                    "brand_id": store.get("brand_id"),
+                    "location": store.get("pms_unit_codes", {}),
+                    "mall_id": state.mall_id,
+                    "is_kid_friendly": True
+                }
+                state.initial_context.append({
+                    "id": f"brand_{store.get('brand_id')}",
+                    "score": 0.95,
+                    "metadata": metadata
+                })
         
-        # Check if this is a family-oriented event or offer
-        is_family_oriented = any(kid_term in title or kid_term in description for kid_term in kid_friendly_categories)
+        # Fetch family-friendly restaurants
+        restaurants = await db_fetch_all_async(
+            """SELECT b.brand_id, b.brand_name_en, b.category_name, 
+               b.description_en, b.pms_unit_codes
+               FROM brands b 
+               JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+               WHERE bma.unique_property_id = $1 AND 
+               (LOWER(b.category_name) LIKE '%restaurant%' OR 
+                LOWER(b.category_name) LIKE '%food%' OR 
+                LOWER(b.category_name) LIKE '%cafe%' OR
+                LOWER(b.category_name) LIKE '%dining%')""", 
+            (state.mall_id,)
+        )
         
-        if is_family_oriented:
-            engagement_type = engagement.get("type", "").lower()
-            metadata = {
-                "type": engagement_type,
-                "title": engagement.get("title_en", ""),
-                "description": engagement.get("description_en", ""),
-                "start_date": engagement.get("start_date", ""),
-                "end_date": engagement.get("end_date", ""),
-                "terms": engagement.get("terms_conditions_en", ""),
-                "is_exclusive": bool(engagement.get("is_exclusive", 0)),
-                "mall_id": state.mall_id,
-                "brand_id": engagement.get("brand_id"),
-                "brand_name": engagement.get("brand_name_en", ""),
-                "is_family_oriented": True
-            }
-            state.initial_context.append({
-                "id": f"engagement_{engagement['engagement_id']}",
-                "score": 0.95,
-                "metadata": metadata
-            })
+        for restaurant in restaurants:
+            description = restaurant.get("description_en", "").lower() if restaurant.get("description_en") else ""
+            
+            # Check if this is a family-friendly restaurant
+            is_family_friendly = any(term in description for term in food_family_keywords)
+            
+            if is_family_friendly:
+                metadata = {
+                    "type": "store",
+                    "name_en": restaurant.get("brand_name_en", ""),
+                    "category_en": restaurant.get("category_name", ""),
+                    "description_en": description,
+                    "brand_id": restaurant.get("brand_id"),
+                    "location": restaurant.get("pms_unit_codes", {}),
+                    "mall_id": state.mall_id,
+                    "is_family_friendly": True
+                }
+                state.initial_context.append({
+                    "id": f"restaurant_{restaurant.get('brand_id')}",
+                    "score": 0.9,
+                    "metadata": metadata
+                })
+        
+        # Fetch family-oriented events and offers
+        engagements = await db_fetch_all_async(
+            """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
+               e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, b.brand_name_en
+               FROM engagements e 
+               LEFT JOIN brands b ON e.brand_id = b.brand_id
+               WHERE e.unique_property_id = $1""",
+            (state.mall_id,)
+        )
+        
+        for engagement in engagements:
+            title = engagement.get("title_en", "").lower() if engagement.get("title_en") else ""
+            description = engagement.get("description_en", "").lower() if engagement.get("description_en") else ""
+            
+            # Check if this is a family-oriented event or offer
+            is_family_oriented = any(kid_term in title or kid_term in description for kid_term in kid_friendly_categories)
+            
+            if is_family_oriented:
+                engagement_type = engagement.get("type", "").lower()
+                metadata = {
+                    "type": engagement_type,
+                    "title": engagement.get("title_en", ""),
+                    "description": description,
+                    "start_date": engagement.get("start_date", ""),
+                    "end_date": engagement.get("end_date", ""),
+                    "terms": engagement.get("terms_conditions_en", ""),
+                    "is_exclusive": bool(engagement.get("is_exclusive", 0)),
+                    "mall_id": state.mall_id,
+                    "brand_id": engagement.get("brand_id"),
+                    "brand_name": engagement.get("brand_name_en", ""),
+                    "is_family_oriented": True
+                }
+                state.initial_context.append({
+                    "id": f"engagement_{engagement.get('engagement_id')}",
+                    "score": 0.95,
+                    "metadata": metadata
+                })
 
-    # Fetch services like play areas, nursing rooms, family restrooms
-    family_services = await db_fetch_all_async(
-        """SELECT s.id, s.name, s.description, s.location, s.is_available
-           FROM services s
-           WHERE s.unique_property_id = $1 AND 
-           (LOWER(s.name) LIKE '%family%' OR 
-            LOWER(s.name) LIKE '%kid%' OR 
-            LOWER(s.name) LIKE '%child%' OR
-            LOWER(s.name) LIKE '%play%' OR
-            LOWER(s.name) LIKE '%baby%' OR
-            LOWER(s.name) LIKE '%stroller%' OR
-            LOWER(s.name) LIKE '%nursing%')""",
-        (state.mall_id,)
-    )
+        # Fetch services like play areas, nursing rooms, family restrooms
+        family_services = await db_fetch_all_async(
+            """SELECT s.id, s.name, s.name_ar, s.description, s.description_ar, s.location, s.is_available
+               FROM services s
+               WHERE s.unique_property_id = $1 AND 
+               (LOWER(s.name) LIKE '%family%' OR 
+                LOWER(s.name) LIKE '%kid%' OR 
+                LOWER(s.name) LIKE '%child%' OR
+                LOWER(s.name) LIKE '%play%' OR
+                LOWER(s.name) LIKE '%baby%' OR
+                LOWER(s.name) LIKE '%stroller%' OR
+                LOWER(s.name) LIKE '%nursing%')""",
+            (state.mall_id,)
+        )
+        
+        for service in family_services:
+            description = service.get("description", "") if service.get("description") else ""
+            metadata = {
+                "type": "service",
+                "name": service.get("name", ""),
+                "description": description,
+                "location": service.get("location", ""),
+                "is_available": service.get("is_available", True),
+                "mall_id": state.mall_id,
+                "is_family_service": True
+            }
+            state.initial_context.append({
+                "id": f"family_service_{service.get('id')}",
+                "score": 1.0, # High priority for family services
+                "metadata": metadata
+            })
+        
+        # If we don't have enough family-specific context, add some general family-friendly suggestions
+        if len(state.initial_context) < 3:
+            # Add generic family activities
+            generic_activities = [
+                {
+                    "type": "family_activity",
+                    "name": "Mall Exploration",
+                    "description": "Take a leisurely walk around the mall with your family, window shopping and enjoying the atmosphere.",
+                    "duration": "1-2 hours",
+                    "cost": "Free",
+                    "suitable_for": "All ages"
+                },
+                {
+                    "type": "family_activity",
+                    "name": "Food Court Visit",
+                    "description": "Enjoy a variety of food options at the mall's food court, where everyone can choose their favorite.",
+                    "duration": "1 hour",
+                    "cost": "Varies",
+                    "suitable_for": "All ages"
+                },
+                {
+                    "type": "family_activity",
+                    "name": "Shopping Together",
+                    "description": "Visit family-friendly stores together and let each family member pick a small treat or gift.",
+                    "duration": "1-3 hours",
+                    "cost": "Varies",
+                    "suitable_for": "All ages"
+                }
+            ]
+            
+            for idx, activity in enumerate(generic_activities):
+                state.initial_context.append({
+                    "id": f"generic_family_activity_{idx}",
+                    "score": 0.8,
+                    "metadata": activity
+                })
+        
+        # Sort the results by score
+        state.initial_context.sort(key=lambda x: x["score"], reverse=True)
+        
+        # Before returning, process any location codes
+        for item in state.initial_context:
+            if "metadata" in item and item["metadata"]:
+                if "location" in item["metadata"]:
+                    item["metadata"]["location"] = convert_location_codes(item["metadata"]["location"])
+        
+        # Cache the results
+        REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
     
-    for service in family_services:
-        metadata = {
-            "type": "service",
-            "name": service.get("name", ""),
-            "description": service.get("description", ""),
-            "location": service.get("location", ""),
-            "is_available": service.get("is_available", True),
-            "mall_id": state.mall_id,
-            "is_family_service": True
-        }
-        state.initial_context.append({
-            "id": f"family_service_{service['id']}",
-            "score": 1.0, # High priority for family services
-            "metadata": metadata
-        })
+    except Exception as e:
+        logger.error(f"Error retrieving family planning context: {e}")
+        # Create fallback family activities
+        generic_activities = [
+            {
+                "type": "family_activity",
+                "name": "Mall Exploration",
+                "description": "Take a leisurely walk around the mall with your family, window shopping and enjoying the atmosphere.",
+                "duration": "1-2 hours",
+                "cost": "Free",
+                "suitable_for": "All ages"
+            },
+            {
+                "type": "family_activity",
+                "name": "Food Court Visit",
+                "description": "Enjoy a variety of food options at the mall's food court, where everyone can choose their favorite.",
+                "duration": "1 hour",
+                "cost": "Varies",
+                "suitable_for": "All ages"
+            },
+            {
+                "type": "family_activity",
+                "name": "Shopping Together",
+                "description": "Visit family-friendly stores together and let each family member pick a small treat or gift.",
+                "duration": "1-3 hours",
+                "cost": "Varies",
+                "suitable_for": "All ages"
+            }
+        ]
+        
+        for idx, activity in enumerate(generic_activities):
+            state.initial_context.append({
+                "id": f"generic_family_activity_{idx}",
+                "score": 0.8,
+                "metadata": activity
+            })
     
-    # Sort the results by score
-    state.initial_context.sort(key=lambda x: x["score"], reverse=True)
-    
-    # Before returning, process any location codes
-    for item in state.initial_context:
-        if "metadata" in item and item["metadata"]:
-            if "location" in item["metadata"]:
-                item["metadata"]["location"] = convert_location_codes(item["metadata"]["location"])
-    
-    # Cache the results
-    REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
     return state
 
 async def retrieve_visit_planning_context(state: CustomerState) -> CustomerState:
@@ -817,199 +909,278 @@ async def retrieve_visit_planning_context(state: CustomerState) -> CustomerState
     # Initialize context
     state.initial_context = []
     
-    # First, get mall information for operating hours and facilities
-    mall_info = await db_fetch_one_async(
-        """SELECT marketing_name, description, opening_hours, map_url, contact_info 
-        FROM malls WHERE unique_property_id = $1""",
-        (state.mall_id,)
-    )
+    try:
+        # Get mall information for operating hours and facilities
+        mall_info = await db_fetch_one_async(
+            """SELECT marketing_name, marketing_name_ar, mall_information, city, country
+            FROM malls WHERE unique_property_id = $1""",
+            (state.mall_id,)
+        )
+        
+        if mall_info:
+            # Extract description from mall_information if it exists
+            mall_description = ""
+            if mall_info.get("mall_information") and isinstance(mall_info.get("mall_information"), dict):
+                mall_description = mall_info.get("mall_information").get("description_en", "")
+            
+            mall_metadata = {
+                "type": "mall",
+                "name": mall_info.get("marketing_name", ""),
+                "description": mall_description,
+                "city": mall_info.get("city", ""),
+                "country": mall_info.get("country", ""),
+                "mall_id": state.mall_id
+            }
+            state.initial_context.append({"id": f"mall_{state.mall_id}", "score": 1.0, "metadata": mall_metadata})
+        
+        # Extract timing context from query
+        short_visit = False
+        long_visit = False
+        
+        if any(term in state.query.lower() for term in ["short", "quick", "brief", "1 hour", "hour", "30 min"]):
+            short_visit = True
+        elif any(term in state.query.lower() for term in ["long", "full day", "all day", "extended"]):
+            long_visit = True
+        
+        # Extract purpose context from query
+        shopping_focus = any(term in state.query.lower() for term in ["shop", "buy", "purchase", "look for"])
+        food_focus = any(term in state.query.lower() for term in ["eat", "food", "dine", "restaurant", "hungry"])
+        entertainment_focus = any(term in state.query.lower() for term in ["fun", "play", "entertainment", "movie", "activity"])
+        date_focus = any(term in state.query.lower() for term in ["date", "romantic", "boyfriend", "girlfriend", "partner", "couple"])
+        family_focus = any(term in state.query.lower() for term in ["family", "kid", "child", "parent", "baby", "toddler"])
+        
+        # If we detect a romantic context, search for appropriate date spots
+        if date_focus:
+            # Get nice restaurants for a romantic meal
+            romantic_spots = await db_fetch_all_async(
+                """SELECT b.brand_id, b.brand_name_en, b.category_name, b.pms_unit_codes
+                FROM brands b 
+                JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+                WHERE bma.unique_property_id = $1 AND 
+                (LOWER(b.category_name) LIKE '%restaurant%' OR 
+                 LOWER(b.category_name) LIKE '%cafe%' OR
+                 LOWER(b.category_name) LIKE '%dining%')
+                LIMIT 5""", 
+                (state.mall_id,)
+            )
+            
+            for spot in romantic_spots:
+                metadata = {
+                    "type": "date_spot",
+                    "name": spot.get("brand_name_en", ""),
+                    "category": spot.get("category_name", ""),
+                    "location": spot.get("pms_unit_codes", {}),
+                    "mall_id": state.mall_id,
+                    "is_restaurant": True
+                }
+                state.initial_context.append({
+                    "id": f"date_spot_{spot.get('brand_id')}",
+                    "score": 0.9,
+                    "metadata": metadata
+                })
+            
+            # Get entertainment options
+            entertainment_spots = await db_fetch_all_async(
+                """SELECT b.brand_id, b.brand_name_en, b.category_name, b.pms_unit_codes
+                FROM brands b 
+                JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+                WHERE bma.unique_property_id = $1 AND 
+                (LOWER(b.category_name) LIKE '%entertainment%' OR 
+                 LOWER(b.category_name) LIKE '%cinema%' OR
+                 LOWER(b.category_name) LIKE '%game%' OR
+                 LOWER(b.category_name) LIKE '%leisure%')
+                LIMIT 3""", 
+                (state.mall_id,)
+            )
+            
+            for spot in entertainment_spots:
+                metadata = {
+                    "type": "date_spot",
+                    "name": spot.get("brand_name_en", ""),
+                    "category": spot.get("category_name", ""),
+                    "location": spot.get("pms_unit_codes", {}),
+                    "mall_id": state.mall_id,
+                    "is_entertainment": True
+                }
+                state.initial_context.append({
+                    "id": f"date_spot_{spot.get('brand_id')}",
+                    "score": 0.85,
+                    "metadata": metadata
+                })
+            
+            # Get cafes for a coffee date
+            cafes = await db_fetch_all_async(
+                """SELECT b.brand_id, b.brand_name_en, b.category_name, b.pms_unit_codes
+                FROM brands b 
+                JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+                WHERE bma.unique_property_id = $1 AND 
+                (LOWER(b.category_name) LIKE '%cafe%' OR 
+                 LOWER(b.category_name) LIKE '%coffee%')
+                LIMIT 3""", 
+                (state.mall_id,)
+            )
+            
+            for cafe in cafes:
+                metadata = {
+                    "type": "date_spot",
+                    "name": cafe.get("brand_name_en", ""),
+                    "category": cafe.get("category_name", ""),
+                    "location": cafe.get("pms_unit_codes", {}),
+                    "mall_id": state.mall_id,
+                    "is_cafe": True
+                }
+                state.initial_context.append({
+                    "id": f"date_spot_{cafe.get('brand_id')}",
+                    "score": 0.8,
+                    "metadata": metadata
+                })
+        
+        # If family focus is detected, prioritize family-friendly places
+        elif family_focus:
+            # Defer to the family planning context retrieval
+            family_context = await retrieve_family_planning_context(state)
+            return family_context
+        
+        # General visit planning - fetch popular attractions
+        if entertainment_focus or not (shopping_focus or food_focus):
+            # Fetch attractions and entertainment venues
+            attractions = await db_fetch_all_async(
+                """SELECT b.brand_id, b.brand_name_en, b.category_name, b.pms_unit_codes
+                FROM brands b 
+                JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+                WHERE bma.unique_property_id = $1 AND 
+                (LOWER(b.category_name) LIKE '%entertainment%' OR 
+                 LOWER(b.category_name) LIKE '%cinema%' OR
+                 LOWER(b.category_name) LIKE '%game%' OR
+                 LOWER(b.category_name) LIKE '%leisure%' OR
+                 LOWER(b.category_name) LIKE '%play%')
+                LIMIT 5""", 
+                (state.mall_id,)
+            )
+            
+            for attraction in attractions:
+                metadata = {
+                    "type": "entertainment",
+                    "name": attraction.get("brand_name_en", ""),
+                    "category": attraction.get("category_name", ""),
+                    "location": attraction.get("pms_unit_codes", {}),
+                    "mall_id": state.mall_id
+                }
+                state.initial_context.append({
+                    "id": f"entertainment_{attraction.get('brand_id')}",
+                    "score": 0.95 if entertainment_focus else 0.85,
+                    "metadata": metadata
+                })
+        
+        # Fetch popular shopping destinations
+        if shopping_focus or not (entertainment_focus or food_focus) or not short_visit:
+            # If no specific category, get popular anchor stores
+            anchor_stores = await db_fetch_all_async(
+                """SELECT b.brand_id, b.brand_name_en, b.category_name, b.pms_unit_codes, b.anchor_brand
+                FROM brands b 
+                JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+                WHERE bma.unique_property_id = $1 AND b.anchor_brand = 1
+                LIMIT 5""", 
+                (state.mall_id,)
+            )
+            
+            for store in anchor_stores:
+                metadata = {
+                    "type": "store",
+                    "name": store.get("brand_name_en", ""),
+                    "category": store.get("category_name", ""),
+                    "location": store.get("pms_unit_codes", {}),
+                    "mall_id": state.mall_id,
+                    "is_anchor": True
+                }
+                state.initial_context.append({
+                    "id": f"store_{store.get('brand_id')}",
+                    "score": 0.9 if shopping_focus else 0.75,
+                    "metadata": metadata
+                })
+        
+        # Fetch food options
+        if food_focus or not short_visit:
+            # Get popular dining options
+            restaurants = await db_fetch_all_async(
+                """SELECT b.brand_id, b.brand_name_en, b.category_name, b.pms_unit_codes
+                FROM brands b 
+                JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+                WHERE bma.unique_property_id = $1 AND 
+                (LOWER(b.category_name) LIKE '%restaurant%' OR 
+                 LOWER(b.category_name) LIKE '%food%' OR 
+                 LOWER(b.category_name) LIKE '%cafe%' OR
+                 LOWER(b.category_name) LIKE '%dining%')
+                LIMIT 5""", 
+                (state.mall_id,)
+            )
+            
+            for restaurant in restaurants:
+                metadata = {
+                    "type": "restaurant",
+                    "name": restaurant.get("brand_name_en", ""),
+                    "category": restaurant.get("category_name", ""),
+                    "location": restaurant.get("pms_unit_codes", {}),
+                    "mall_id": state.mall_id
+                }
+                state.initial_context.append({
+                    "id": f"restaurant_{restaurant.get('brand_id')}",
+                    "score": 0.95 if food_focus else 0.8,
+                    "metadata": metadata
+                })
+        
+        # Fetch current offers and events
+        offers = await db_fetch_all_async(
+            """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
+            e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, b.brand_name_en
+            FROM engagements e 
+            LEFT JOIN brands b ON e.brand_id = b.brand_id
+            WHERE e.unique_property_id = $1
+            LIMIT 3""",
+            (state.mall_id,)
+        )
+        
+        for offer in offers:
+            title = offer.get("title_en", "")
+            if title:  # Only include events with titles
+                metadata = {
+                    "type": "offer" if offer.get("type", "").lower() == "offer" else "event",
+                    "title": title,
+                    "description": offer.get("description_en", "") if offer.get("description_en") else "",
+                    "start_date": offer.get("start_date", ""),
+                    "end_date": offer.get("end_date", ""),
+                    "brand_name": offer.get("brand_name_en", ""),
+                    "mall_id": state.mall_id
+                }
+                state.initial_context.append({
+                    "id": f"offer_{offer.get('engagement_id')}",
+                    "score": 0.85,
+                    "metadata": metadata
+                })
+        
+        # Sort the results by score
+        state.initial_context.sort(key=lambda x: x["score"], reverse=True)
+        
+        # Before returning, process any location codes
+        for item in state.initial_context:
+            if "metadata" in item and item["metadata"]:
+                if "location" in item["metadata"]:
+                    item["metadata"]["location"] = convert_location_codes(item["metadata"]["location"])
+        
+        # Cache results
+        REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
     
-    if mall_info:
-        # Create a synthetic context entry for the mall itself
-        mall_metadata = {
-            "type": "mall",
-            "name": mall_info.get("marketing_name", ""),
-            "description": mall_info.get("description", ""),
-            "opening_hours": mall_info.get("opening_hours", ""),
-            "map_url": mall_info.get("map_url", ""),
-            "contact_info": mall_info.get("contact_info", ""),
-            "mall_id": state.mall_id
-        }
-        state.initial_context.append({"id": f"mall_{state.mall_id}", "score": 1.0, "metadata": mall_metadata})
+    except Exception as e:
+        logger.error(f"Error retrieving visit planning context: {e}")
+        # Create minimal context with just mall info
+        if len(state.initial_context) == 0:
+            mall_metadata = {
+                "type": "mall",
+                "name": "the mall",
+                "mall_id": state.mall_id
+            }
+            state.initial_context.append({"id": f"mall_{state.mall_id}", "score": 1.0, "metadata": mall_metadata})
     
-    # Get current date for filtering current/future events
-    current_date = datetime.now().isoformat()
-    
-    # Fetch current events
-    events = await db_fetch_all_async(
-        """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
-           e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, b.brand_name_en
-           FROM engagements e 
-           LEFT JOIN brands b ON e.brand_id = b.brand_id
-           WHERE e.unique_property_id = $1 AND 
-           e.type = 'event' AND
-           (e.end_date >= $2 OR e.end_date IS NULL)
-           ORDER BY e.start_date ASC
-           LIMIT 5""",
-        (state.mall_id, current_date)
-    )
-    
-    for event in events:
-        metadata = {
-            "type": "event",
-            "title": event.get("title_en", ""),
-            "description": event.get("description_en", ""),
-            "start_date": event.get("start_date", ""),
-            "end_date": event.get("end_date", ""),
-            "terms": event.get("terms_conditions_en", ""),
-            "mall_id": state.mall_id,
-            "brand_id": event.get("brand_id"),
-            "brand_name": event.get("brand_name_en", "")
-        }
-        state.initial_context.append({
-            "id": f"event_{event['engagement_id']}",
-            "score": 0.95,
-            "metadata": metadata
-        })
-    
-    # Fetch exclusive or highlighted offers
-    offers = await db_fetch_all_async(
-        """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
-           e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, b.brand_name_en
-           FROM engagements e 
-           LEFT JOIN brands b ON e.brand_id = b.brand_id
-           WHERE e.unique_property_id = $1 AND 
-           e.type = 'offer' AND
-           e.is_exclusive = true AND
-           (e.end_date >= $2 OR e.end_date IS NULL)
-           ORDER BY e.is_exclusive DESC, e.start_date ASC
-           LIMIT 5""",
-        (state.mall_id, current_date)
-    )
-    
-    for offer in offers:
-        metadata = {
-            "type": "offer",
-            "title": offer.get("title_en", ""),
-            "description": offer.get("description_en", ""),
-            "start_date": offer.get("start_date", ""),
-            "end_date": offer.get("end_date", ""),
-            "terms": offer.get("terms_conditions_en", ""),
-            "is_exclusive": True,
-            "mall_id": state.mall_id,
-            "brand_id": offer.get("brand_id"),
-            "brand_name": offer.get("brand_name_en", "")
-        }
-        state.initial_context.append({
-            "id": f"offer_{offer['engagement_id']}",
-            "score": 0.9,
-            "metadata": metadata
-        })
-    
-    # Fetch popular dining options
-    restaurants = await db_fetch_all_async(
-        """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
-           b.pms_unit_codes
-           FROM brands b 
-           JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
-           WHERE bma.unique_property_id = $1 AND 
-           (LOWER(b.category_name) LIKE '%restaurant%' OR 
-            LOWER(b.category_name) LIKE '%food%' OR 
-            LOWER(b.category_name) LIKE '%cafe%' OR
-            LOWER(b.category_name) LIKE '%dining%')
-           LIMIT 5""", 
-        (state.mall_id,)
-    )
-    
-    for restaurant in restaurants:
-        metadata = {
-            "type": "store",
-            "name_en": restaurant["brand_name_en"],
-            "category_en": restaurant.get("category_name", ""),
-            "description_en": restaurant.get("description_en", ""),
-            "brand_id": restaurant["brand_id"],
-            "location": restaurant.get("pms_unit_codes", {}),
-            "mall_id": state.mall_id
-        }
-        state.initial_context.append({
-            "id": f"restaurant_{restaurant['brand_id']}",
-            "score": 0.85,
-            "metadata": metadata
-        })
-    
-    # Fetch popular shopping stores
-    stores = await db_fetch_all_async(
-        """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
-           b.pms_unit_codes
-           FROM brands b 
-           JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
-           WHERE bma.unique_property_id = $1 AND 
-           (LOWER(b.category_name) LIKE '%fashion%' OR 
-            LOWER(b.category_name) LIKE '%clothing%' OR 
-            LOWER(b.category_name) LIKE '%apparel%' OR
-            LOWER(b.category_name) LIKE '%accessories%')
-           LIMIT 5""", 
-        (state.mall_id,)
-    )
-    
-    for store in stores:
-        metadata = {
-            "type": "store",
-            "name_en": store["brand_name_en"],
-            "category_en": store.get("category_name", ""),
-            "description_en": store.get("description_en", ""),
-            "brand_id": store["brand_id"],
-            "location": store.get("pms_unit_codes", {}),
-            "mall_id": state.mall_id
-        }
-        state.initial_context.append({
-            "id": f"store_{store['brand_id']}",
-            "score": 0.8,
-            "metadata": metadata
-        })
-    
-    # Fetch entertainment options
-    entertainment = await db_fetch_all_async(
-        """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
-           b.pms_unit_codes
-           FROM brands b 
-           JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
-           WHERE bma.unique_property_id = $1 AND 
-           (LOWER(b.category_name) LIKE '%entertainment%' OR 
-            LOWER(b.category_name) LIKE '%cinema%' OR 
-            LOWER(b.category_name) LIKE '%movie%' OR
-            LOWER(b.category_name) LIKE '%game%' OR
-            LOWER(b.category_name) LIKE '%play%' OR
-            LOWER(b.category_name) LIKE '%arcade%')
-           LIMIT 3""", 
-        (state.mall_id,)
-    )
-    
-    for venue in entertainment:
-        metadata = {
-            "type": "store",
-            "name_en": venue["brand_name_en"],
-            "category_en": venue.get("category_name", ""),
-            "description_en": venue.get("description_en", ""),
-            "brand_id": venue["brand_id"],
-            "location": venue.get("pms_unit_codes", {}),
-            "mall_id": state.mall_id,
-            "is_entertainment": True
-        }
-        state.initial_context.append({
-            "id": f"entertainment_{venue['brand_id']}",
-            "score": 0.9,
-            "metadata": metadata
-        })
-    
-    # Before returning, process any location codes
-    for item in state.initial_context:
-        if "metadata" in item and item["metadata"]:
-            if "location" in item["metadata"]:
-                item["metadata"]["location"] = convert_location_codes(item["metadata"]["location"])
-    
-    # Cache the results
-    REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
     return state
 
 async def retrieve_fallback_context(state: CustomerState) -> CustomerState:
@@ -1543,32 +1714,179 @@ async def generate_response(state: CustomerState) -> CustomerState:
     logger.info(f"Conversation topic: {state.conversation_topic}, Turn count: {state.topic_turn_count}")
     
     try:
-        response = await asyncio.to_thread(
-            customer_chain.invoke,
-            {
-                "context": state.response,
-                "query": state.query,
-                "lang": state.language,
-                "conversation_history": formatted_history,
-                "mall_name": mall_name,
-                "resolved_entity": resolved_entity,
-                "topic_turn_count": state.topic_turn_count,
-                "conversation_topic": state.conversation_topic
-            }
-        )
-        
-        # For family planning and visit planning queries that are follow-ups,
-        # we should progressively build an itinerary/plan
-        if state.query_type in ["family_planning_query", "visit_planning_query"] and state.topic_turn_count > 1:
-            # Add a note about the progressive nature of the conversation
-            if state.topic_turn_count >= 3:
-                # After 3 turns, we should finalize the plan/itinerary
-                if "plan" not in response.lower() and "itinerary" not in response.lower():
-                    response += "\n\nI've put together this visit plan based on your preferences. Enjoy your visit to the mall!"
+        # Special handling for "feeling bored" or entertainment queries
+        if "bored" in state.query.lower() or "entertainment" in state.query.lower() or "to do" in state.query.lower():
+            # Override query type to fetch events
+            state.query_type = "offer_or_event_info_query"
+            # Attempt to fetch fresh event data
+            events_data = await db_fetch_all_async(
+                """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
+                   e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, b.brand_name_en
+                   FROM engagements e 
+                   LEFT JOIN brands b ON e.brand_id = b.brand_id
+                   WHERE e.unique_property_id = $1
+                   LIMIT 10""",
+                (state.mall_id,)
+            )
             
-        state.response = response
+            if events_data and len(events_data) > 0:
+                events_context = []
+                for event in events_data:
+                    event_title = event.get("title_en", "")
+                    if event_title:  # Only include events with titles
+                        event_metadata = {
+                            "type": "event",
+                            "title": event_title,
+                            "description": event.get("description_en", "") if event.get("description_en") else "",
+                            "start_date": event.get("start_date", ""),
+                            "end_date": event.get("end_date", ""),
+                            "brand_name": event.get("brand_name_en", "")
+                        }
+                        events_context.append({
+                            "id": f"event_{event.get('engagement_id')}",
+                            "score": 0.95,
+                            "metadata": event_metadata
+                        })
+                
+                if events_context:
+                    state.initial_context = events_context
+                    formatted_events = "\n\n".join([
+                        f"{i+1}. {event['metadata']['title']} by {event['metadata']['brand_name']}"
+                        for i, event in enumerate(events_context[:5])
+                    ])
+                    state.response = f"Here are some current events at {mall_name}:\n\n{formatted_events}\n\nWould you like more details about any of these events?"
+        
+        # Ensure all response data has proper location formatting
+        if state.context_data and isinstance(state.context_data, dict):
+            # Recursively process all nested dictionaries to fix location codes
+            def process_locations(data):
+                if isinstance(data, dict):
+                    # Check for location field
+                    if "location" in data:
+                        data["location"] = convert_location_codes(data["location"])
+                    
+                    # Process all other dictionary values
+                    for key, value in data.items():
+                        if isinstance(value, (dict, list)):
+                            process_locations(value)
+                elif isinstance(data, list):
+                    for item in data:
+                        process_locations(item)
+            
+            process_locations(state.context_data)
+        
+        # Handle empty responses
+        if not state.response and (not state.context_data or not state.initial_context):
+            # Try to fetch relevant data based on query type
+            if state.query_type == "product_info_query":
+                state.response = "I don't have specific product information for that query. Could you try asking about a specific store or type of product?"
+            elif state.query_type == "offer_or_event_info_query":
+                state.response = "I don't have information about any current events or offers matching your criteria at the moment."
+            elif state.query_type == "family_planning_query":
+                # Fetch real data for family-friendly places
+                family_stores = await db_fetch_all_async(
+                    """SELECT b.brand_id, b.brand_name_en, b.category_name, b.pms_unit_codes
+                       FROM brands b 
+                       JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+                       WHERE bma.unique_property_id = $1 AND 
+                       (LOWER(b.category_name) LIKE '%toy%' OR 
+                        LOWER(b.category_name) LIKE '%kid%' OR 
+                        LOWER(b.category_name) LIKE '%child%' OR
+                        LOWER(b.category_name) LIKE '%play%' OR
+                        LOWER(b.category_name) LIKE '%game%')
+                       LIMIT 5""", 
+                    (state.mall_id,)
+                )
+                
+                restaurants = await db_fetch_all_async(
+                    """SELECT b.brand_id, b.brand_name_en, b.category_name, b.pms_unit_codes
+                       FROM brands b 
+                       JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
+                       WHERE bma.unique_property_id = $1 AND 
+                       (LOWER(b.category_name) LIKE '%restaurant%' OR 
+                        LOWER(b.category_name) LIKE '%food%' OR
+                        LOWER(b.category_name) LIKE '%cafe%')
+                       LIMIT 3""", 
+                    (state.mall_id,)
+                )
+                
+                family_plan = "Here's a family-friendly plan you might enjoy:\n\n"
+                
+                if family_stores:
+                    family_activities = []
+                    for store in family_stores[:2]:  # Limit to 2 stores
+                        name = store.get("brand_name_en", "")
+                        location = convert_location_codes(store.get("pms_unit_codes", {}))
+                        category = store.get("category_name", "")
+                        if name:
+                            activity = f"Visit {name} at {location}"
+                            if category:
+                                activity += f" for {category}"
+                            family_activities.append(activity)
+                    
+                    if family_activities:
+                        family_plan += "1. " + family_activities[0] + "\n\n"
+                        if len(family_activities) > 1:
+                            family_plan += "2. " + family_activities[1] + "\n\n"
+                
+                if restaurants:
+                    restaurant = restaurants[0]  # Take first restaurant
+                    name = restaurant.get("brand_name_en", "")
+                    location = convert_location_codes(restaurant.get("pms_unit_codes", {}))
+                    if name:
+                        family_plan += f"{len(family_activities) + 1}. Enjoy a meal at {name} at {location}\n\n"
+                
+                family_plan += f"{len(family_activities) + 2}. Take a relaxing walk around the mall and window shop together\n\n"
+                family_plan += "Would you like me to suggest any specific stores or activities for your family?"
+                
+                state.response = family_plan
+            else:
+                state.response = "I don't have that information available right now. Could you try asking something else?"
+        
+        # Double-check for any remaining location codes in the response
+        if state.response:
+            # Replace common location code patterns with readable format
+            location_code_patterns = [
+                (r'FF\d*', 'First Floor'),
+                (r'GF\d*', 'Ground Floor'),
+                (r'F1\d*', 'First Floor'),
+                (r'F2\d*', 'Second Floor'),
+                (r'F3\d*', 'Third Floor'),
+                (r'BSW\d*', 'Basement West'),
+                (r'BSE\d*', 'Basement East')
+            ]
+            
+            for pattern, replacement in location_code_patterns:
+                state.response = re.sub(pattern, replacement, state.response)
+        
+        # Generate the final response via the LLM
+        try:
+            response = await asyncio.to_thread(
+                customer_chain.invoke,
+                {
+                    "context": state.response,
+                    "query": state.query,
+                    "lang": state.language,
+                    "conversation_history": formatted_history,
+                    "mall_name": mall_name,
+                    "resolved_entity": resolved_entity,
+                    "topic_turn_count": state.topic_turn_count,
+                    "conversation_topic": state.conversation_topic
+                }
+            )
+            
+            # Final scan for any location codes
+            for pattern, replacement in location_code_patterns:
+                response = re.sub(pattern, replacement, response)
+            
+            state.response = response
+        except Exception as e:
+            logger.error(f"Error generating final response: {e}")
+            # Keep existing response if we have one, otherwise use fallback
+            if not state.response:
+                state.response = "I'm having trouble processing your request right now. Please try again."
     except Exception as e:
-        logger.error(f"Error generating response: {e}")
+        logger.error(f"Error in generate_response: {e}")
         state.response = "I'm having trouble processing your request right now. Please try again."
     
     return state
