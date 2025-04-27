@@ -30,8 +30,104 @@ DB_CONFIG_ASYNC = {
     "port": int(os.getenv("DB_PORT", "5432"))  # Convert port to int
 }
 
-# Redis setup
-REDIS_CLIENT = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+# Redis setup with connection pooling
+REDIS_POOL = redis.ConnectionPool(host='localhost', port=6379, db=0, decode_responses=True, max_connections=10)
+def get_redis_client():
+    return redis.Redis(connection_pool=REDIS_POOL)
+
+REDIS_CLIENT = get_redis_client()
+
+# Cache TTLs
+SHORT_CACHE_TTL = 60  # 1 minute
+MEDIUM_CACHE_TTL = 300  # 5 minutes
+LONG_CACHE_TTL = 3600  # 1 hour
+EXTENDED_CACHE_TTL = 86400  # 24 hours
+
+# In-memory LRU cache for frequently accessed data
+# This reduces Redis network calls for hot data
+MEMORY_CACHE = {}
+MEMORY_CACHE_MAX_SIZE = 100
+MEMORY_CACHE_TTL = 60  # 1 minute
+
+def set_memory_cache(key, value, ttl=MEMORY_CACHE_TTL):
+    """Set a value in the memory cache with expiration"""
+    now = datetime.now().timestamp()
+    MEMORY_CACHE[key] = (value, now + ttl)
+    
+    # Clean up cache if it's too large
+    if len(MEMORY_CACHE) > MEMORY_CACHE_MAX_SIZE:
+        # Remove expired items
+        current_time = now
+        expired_keys = [k for k, v in MEMORY_CACHE.items() if v[1] < current_time]
+        for k in expired_keys:
+            MEMORY_CACHE.pop(k, None)
+        
+        # If still too large, remove oldest items
+        if len(MEMORY_CACHE) > MEMORY_CACHE_MAX_SIZE:
+            items = sorted(MEMORY_CACHE.items(), key=lambda x: x[1][1])
+            to_remove = items[:len(items) // 4]  # Remove 25% of oldest items
+            for k, _ in to_remove:
+                MEMORY_CACHE.pop(k, None)
+
+def get_memory_cache(key):
+    """Get a value from memory cache if it exists and hasn't expired"""
+    if key in MEMORY_CACHE:
+        value, expiry = MEMORY_CACHE[key]
+        if datetime.now().timestamp() < expiry:
+            return value
+        else:
+            MEMORY_CACHE.pop(key, None)
+    return None
+
+# Helper function to safely decode Redis responses
+def safe_redis_decode(value):
+    """Safely decode a Redis response to a string"""
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode('utf-8')
+    elif not isinstance(value, str):
+        return str(value)
+    return value
+
+# Helper function to handle Redis JSON serialization/deserialization
+def redis_get_json(key):
+    """Get a JSON value from Redis with safe decoding"""
+    redis_client = get_redis_client()
+    
+    # Check memory cache first
+    mem_cached = get_memory_cache(f"json:{key}")
+    if mem_cached is not None:
+        return mem_cached
+    
+    # Try Redis if not in memory cache
+    value = redis_client.get(key)
+    if value is None:
+        return None
+    
+    try:
+        value = safe_redis_decode(value)
+        if value is None:
+            return None
+        result = json.loads(value)
+        # Store in memory cache
+        set_memory_cache(f"json:{key}", result)
+        return result
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+def redis_set_json(key, value, ex=MEDIUM_CACHE_TTL):
+    """Set a JSON value in Redis with expiry"""
+    redis_client = get_redis_client()
+    try:
+        json_value = json.dumps(value)
+        redis_client.set(key, json_value, ex=ex)
+        # Update memory cache
+        set_memory_cache(f"json:{key}", value)
+        return True
+    except Exception as e:
+        logger.warning(f"Error setting Redis JSON value: {e}")
+        return False
 
 # Asyncpg pool
 DB_POOL: Optional[Pool] = None
@@ -171,26 +267,23 @@ async def get_conversation_history(conversation_id: str, max_messages: int = 20)
 async def get_history_cached(conversation_id: str, max_messages: int = 20) -> List[Dict[str, Any]]:
     """
     Optimized function to get conversation history with enhanced caching.
-    Uses a TTL cache and batched fetching for better performance.
+    Uses memory cache -> Redis cache -> database with efficient querying.
     """
     cache_key = f"history_opt:{conversation_id}"
     
-    # Try to get from Redis cache first
-    cached_history = REDIS_CLIENT.get(cache_key)
+    # Try memory cache first (fastest)
+    mem_cached = get_memory_cache(cache_key)
+    if mem_cached is not None:
+        return mem_cached
+    
+    # Try Redis cache next
+    cached_history = redis_get_json(cache_key)
     if cached_history:
-        # Ensure properly decoded string for JSON loading
-        if isinstance(cached_history, bytes):
-            cached_history = cached_history.decode('utf-8')
-        elif not isinstance(cached_history, str):
-            cached_history = str(cached_history)
-        try:
-            return json.loads(cached_history)
-        except:
-            # If cache parsing fails, proceed to fetch from database
-            pass
+        # Store in memory cache for future quick access
+        set_memory_cache(cache_key, cached_history)
+        return cached_history
     
     # Fetch from database using a more efficient query
-    # Use a single query with ORDER BY and LIMIT
     query = """
     SELECT role, content 
     FROM conversation_messages 
@@ -205,13 +298,7 @@ async def get_history_cached(conversation_id: str, max_messages: int = 20) -> Li
     history = [{"role": msg["role"], "content": msg["content"]} for msg in messages]
     
     # Cache the result with a TTL
-    try:
-        REDIS_CLIENT.set(
-            cache_key, 
-            json.dumps(history),
-            ex=600  # 10 minute cache
-        )
-    except Exception as e:
-        logger.warning(f"Failed to cache conversation history: {e}")
+    redis_set_json(cache_key, history, ex=LONG_CACHE_TTL)
+    set_memory_cache(cache_key, history)
     
     return history

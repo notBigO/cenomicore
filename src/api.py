@@ -10,7 +10,9 @@ from utils import (
     detect_language, get_or_create_conversation, db_fetch_all_async, 
     get_conversation_history, add_message_to_conversation, db_fetch_one_async, 
     db_execute_async, DateTimeEncoder, logger, get_db_pool, REDIS_CLIENT,
-    Message, get_history_cached
+    Message, get_history_cached, redis_get_json, redis_set_json, safe_redis_decode,
+    SHORT_CACHE_TTL, MEDIUM_CACHE_TTL, LONG_CACHE_TTL, EXTENDED_CACHE_TTL,
+    get_memory_cache, set_memory_cache
 )
 from customer import CustomerState, customer_graph
 from tenant import TenantState, tenant_graph
@@ -81,14 +83,28 @@ class TTSRequest(BaseModel):
     text: str
     language: str = "en"
 
-# Cache TTS responses
+# Cache TTS responses with in-memory fast cache before Redis
 TTS_CACHE = {}
+TTS_CACHE_MAX_SIZE = 50
 
 async def generate_speech(text: str, language: str = "en") -> bytes:
-    cache_key = f"{text}:{language}"
-    if cache_key in TTS_CACHE:
-        return TTS_CACHE[cache_key]
+    cache_key = f"tts:{text}:{language}"
     
+    # Check memory cache first (fastest)
+    mem_cached = get_memory_cache(cache_key)
+    if mem_cached is not None:
+        return mem_cached
+    
+    # Check Redis cache next
+    redis_client = REDIS_CLIENT
+    redis_cached = redis_client.get(cache_key)
+    if redis_cached:
+        # Cache hit - store in memory for future requests
+        if isinstance(redis_cached, bytes):
+            set_memory_cache(cache_key, redis_cached)
+            return redis_cached
+    
+    # Cache miss - generate new audio
     url = "https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM"
     headers = {
         "xi-api-key": ELEVENLABS_API_KEY,
@@ -111,13 +127,11 @@ async def generate_speech(text: str, language: str = "en") -> bytes:
     
     try:
         audio_data = await asyncio.to_thread(_make_request)
-        # Cache the result
-        TTS_CACHE[cache_key] = audio_data
-        # Limit cache size
-        if len(TTS_CACHE) > 100:
-            # Remove oldest items
-            for k in list(TTS_CACHE.keys())[:10]:
-                TTS_CACHE.pop(k, None)
+        
+        # Cache the result in both Redis and memory
+        redis_client.set(cache_key, audio_data, ex=LONG_CACHE_TTL)  # 1 hour cache
+        set_memory_cache(cache_key, audio_data, ttl=MEDIUM_CACHE_TTL)  # 5 minute memory cache
+        
         return audio_data
     except Exception as e:
         logger.error(f"TTS generation failed: {str(e)}")
@@ -217,6 +231,12 @@ async def chat(request: ChatRequest):
     try:
         text = request.text or ""
         
+        # Use request-based caching for identical recent requests
+        cache_key = f"chat:{hash(json.dumps(request.dict(), sort_keys=True))}"
+        cached_response = get_memory_cache(cache_key)
+        if cached_response:
+            return ChatResponse(**cached_response)
+        
         # Determine language asynchronously
         language = request.language
         if not language:
@@ -227,30 +247,40 @@ async def chat(request: ChatRequest):
                     return "en"
             language = await asyncio.to_thread(detect_lang)
         
-        # Create or get conversation
-        conversation_task = get_or_create_conversation(request.conversation_id, request.user_id, language)
+        # Create or get conversation and fetch initial data in parallel
+        tasks = [
+            get_or_create_conversation(request.conversation_id, request.user_id, language),
+            # Other tasks will be added after we have conversation_id
+        ]
         
-        # These tasks can run in parallel
-        conversation_id = await conversation_task
+        # Get the conversation ID first
+        conversation_id = await tasks[0]
         
-        # Get history and metadata concurrently
+        # Now we can set up the history and metadata tasks
         history_task = get_history_cached(conversation_id)
         conv_data_task = db_fetch_one_async(
             "SELECT meta_data FROM conversations WHERE id = $1",
             (conversation_id,)
         )
         
+        # Run these tasks in parallel
         history, conv_data = await asyncio.gather(history_task, conv_data_task)
         
         state_data = {}
         if conv_data and conv_data.get("meta_data"):
-            meta_data = json.loads(conv_data["meta_data"])
-            if "state" in meta_data:
-                state_data = meta_data["state"]
+            try:
+                # Parse JSON only once
+                meta_data = json.loads(conv_data["meta_data"])
+                if "state" in meta_data:
+                    state_data = meta_data["state"]
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.error(f"Error parsing meta_data JSON: {e}")
 
+        # Remove keys that will be set directly
         for key in ['query', 'user_id', 'language', 'conversation_id', 'conversation_history', 'mall_id']:
             state_data.pop(key, None)
 
+        # Create customer state object
         state = CustomerState(
             query=text,
             user_id=request.user_id,
@@ -261,22 +291,31 @@ async def chat(request: ChatRequest):
             **state_data
         )
 
+        # Start TTS generation early if needed
+        tts_task = None
+        
         # Process the request through the graph
         with trace(name="CustomerChat", inputs={"query": text, "user_id": request.user_id, "mall_id": request.mall_id}):
             result = await customer_graph.ainvoke(state)
+            
+            # If TTS is requested, start generating it as soon as we have the response
+            if request.include_tts and result["response"]:
+                tts_task = generate_speech(result["response"], language)
 
-        # Update the conversation with new messages
+        # Prepare the response for caching
+        response_data = {
+            "message": result["response"],
+            "conversation_id": conversation_id,
+            "audio_base64": None
+        }
+        
+        # Update the conversation with new messages and metadata
         tasks = [
             add_message(conversation_id, "user", text),
             add_message(conversation_id, "assistant", result["response"])
         ]
         
-        # If TTS is requested, generate it in parallel
-        audio_task = None
-        if request.include_tts and result["response"]:
-            audio_task = generate_speech(result["response"], language)
-        
-        # Update history
+        # Update history for metadata
         updated_history = history + [
             {"role": "user", "content": text},
             {"role": "assistant", "content": result["response"]}
@@ -294,16 +333,17 @@ async def chat(request: ChatRequest):
         await asyncio.gather(*tasks)
 
         # Get TTS result if requested
-        audio_base64 = None
-        if audio_task:
-            audio_data = await audio_task
-            audio_base64 = base64.b64encode(audio_data).decode("utf-8")
-
-        return ChatResponse(
-            message=result["response"],
-            conversation_id=conversation_id,
-            audio_base64=audio_base64
-        )
+        if tts_task:
+            try:
+                audio_data = await tts_task
+                response_data["audio_base64"] = base64.b64encode(audio_data).decode("utf-8")
+            except Exception as e:
+                logger.error(f"TTS generation failed: {e}")
+        
+        # Cache the response for identical requests (short TTL)
+        set_memory_cache(cache_key, response_data, ttl=SHORT_CACHE_TTL)
+        
+        return ChatResponse(**response_data)
     except Exception as e:
         logger.error(f"Error processing chat request: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -393,23 +433,23 @@ async def root():
 
 @app.get("/malls")
 async def get_malls():
-    # Use Redis cache for mall list
-    malls_cache = REDIS_CLIENT.get("malls:list")
-    if malls_cache:
-        try:
-            if isinstance(malls_cache, bytes):
-                malls_cache = malls_cache.decode('utf-8')
-            elif not isinstance(malls_cache, str):
-                # Convert to string if it's neither bytes nor string
-                malls_cache = str(malls_cache)
-            return json.loads(malls_cache)
-        except:
-            # If there's an error with the cache, proceed to fetch from DB
-            pass
+    # Use memory cache first
+    mem_cached = get_memory_cache("malls:list")
+    if mem_cached is not None:
+        return mem_cached
     
+    # Then try Redis cache
+    cached_malls = redis_get_json("malls:list")
+    if cached_malls:
+        set_memory_cache("malls:list", cached_malls, ttl=LONG_CACHE_TTL)
+        return cached_malls
+    
+    # Finally query database
     malls = await db_fetch_all_async("SELECT unique_property_id as mall_id, marketing_name as name_en FROM malls")
     result = [{"mall_id": str(mall["mall_id"]), "name_en": mall["name_en"]} for mall in malls]
     
-    # Cache mall list for 1 hour
-    REDIS_CLIENT.set("malls:list", json.dumps(result), ex=3600)
+    # Cache the result with a long TTL
+    redis_set_json("malls:list", result, ex=EXTENDED_CACHE_TTL)  # Cache for 24 hours
+    set_memory_cache("malls:list", result, ttl=LONG_CACHE_TTL)  # Cache in memory for 1 hour
+    
     return result
