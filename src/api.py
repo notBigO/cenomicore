@@ -21,7 +21,6 @@ import os
 from customer import populate_knowledge_graph
 import uuid
 from io import BytesIO
-from pydub import AudioSegment  # Added pydub import
 
 app = FastAPI()
 app.add_middleware(
@@ -77,37 +76,6 @@ class TTSRequest(BaseModel):
     text: str
     language: str = "en"
 
-async def transcribe_audio(audio_data: bytes, language: str = "en") -> str:
-    url = "https://api.elevenlabs.io/v1/speech-to-text"
-    headers = {
-        "xi-api-key": ELEVENLABS_API_KEY,
-    }
-    try:
-        # Convert audio to ensure compatibility (PCM WAV, 16-bit, 44.1kHz, mono)
-        audio = AudioSegment.from_file(BytesIO(audio_data), format="wav")
-        audio = audio.set_channels(1).set_frame_rate(44100).set_sample_width(2)  # Mono, 44.1kHz, 16-bit
-        output = BytesIO()
-        audio.export(output, format="wav")
-        audio_bytes = output.getvalue()
-
-        # Send as multipart form data
-        files = {
-            "file": ("audio.wav", audio_bytes, "audio/wav"),
-        }
-        data = {
-            "language": language,
-        }
-        response = requests.post(url, headers=headers, files=files, data=data)
-        response.raise_for_status()
-        result = response.json()
-        if "text" not in result:
-            logger.error(f"No text in STT response: {result}")
-            raise HTTPException(status_code=500, detail="No transcription returned from STT")
-        return result["text"]
-    except Exception as e:
-        logger.error(f"STT request failed: {str(e)}, Response: {response.text if 'response' in locals() else 'No response'}")
-        raise HTTPException(status_code=500, detail=f"STT failed: {str(e)}")
-
 async def generate_speech(text: str, language: str = "en") -> bytes:
     url = "https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM"
     headers = {
@@ -126,16 +94,6 @@ async def generate_speech(text: str, language: str = "en") -> bytes:
     except Exception as e:
         logger.error(f"TTS generation failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"TTS generation failed: {str(e)}")
-
-@app.post("/stt")
-async def stt(audio: UploadFile = File(...), language: str = Form("en")):
-    try:
-        audio_data = await audio.read()
-        text = await transcribe_audio(audio_data, language)
-        return {"text": text}
-    except Exception as e:
-        logger.error(f"STT error: {e}")
-        raise HTTPException(status_code=500, detail=f"STT failed: {str(e)}")
 
 @app.post("/tts")
 async def tts(request: TTSRequest):
@@ -199,6 +157,12 @@ async def get_history(conversation_id: str, max_messages: int = 20) -> List[Dict
     cache_key = f"history:{conversation_id}"
     cached_history = REDIS_CLIENT.get(cache_key)
     if cached_history:
+        # Handle potential type issues with Redis response
+        if isinstance(cached_history, bytes):
+            cached_history = cached_history.decode('utf-8')
+        elif not isinstance(cached_history, str):
+            # Convert to string if it's neither bytes nor string
+            cached_history = str(cached_history)
         return json.loads(cached_history)
     
     messages = await db_fetch_all_async(
@@ -223,11 +187,7 @@ async def get_history(conversation_id: str, max_messages: int = 20) -> List[Dict
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     try:
-        if request.audio and not request.text:
-            audio_data = base64.b64decode(request.audio)
-            text = await transcribe_audio(audio_data, request.language or "en")
-        else:
-            text = request.text or ""
+        text = request.text or ""
         
         language = request.language or detect_language(text) or "en"
         conversation_id = await get_or_create_conversation(request.conversation_id, request.user_id, language)
