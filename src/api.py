@@ -12,7 +12,7 @@ from utils import (
     db_execute_async, DateTimeEncoder, logger, get_db_pool, REDIS_CLIENT,
     Message, get_history_cached, redis_get_json, redis_set_json, safe_redis_decode,
     SHORT_CACHE_TTL, MEDIUM_CACHE_TTL, LONG_CACHE_TTL, EXTENDED_CACHE_TTL,
-    get_memory_cache, set_memory_cache
+    get_memory_cache, set_memory_cache, strip_markdown
 )
 from customer import CustomerState, customer_graph
 from tenant import TenantState, tenant_graph
@@ -91,7 +91,10 @@ TTS_CACHE = {}
 TTS_CACHE_MAX_SIZE = 50
 
 async def generate_speech(text: str, language: str = "en") -> bytes:
-    cache_key = f"tts:{text}:{language}"
+    # Strip markdown symbols from text for TTS
+    clean_text = strip_markdown(text)
+    
+    cache_key = f"tts:{clean_text}:{language}"
     
     # Check memory cache first (fastest)
     mem_cached = get_memory_cache(cache_key)
@@ -120,7 +123,7 @@ async def generate_speech(text: str, language: str = "en") -> bytes:
         "Content-Type": "application/json",
     }
     data = {
-        "text": text,
+        "text": clean_text,
         "model_id": "eleven_monolingual_v1" if language == "en" else "eleven_multilingual_v2",
         "voice_settings": {"stability": 0.5, "similarity_boost": 0.5}
     }

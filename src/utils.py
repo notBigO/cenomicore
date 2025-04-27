@@ -13,6 +13,7 @@ import asyncpg
 from asyncpg.pool import Pool
 import uuid
 import functools
+import re
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -302,3 +303,11 @@ async def get_history_cached(conversation_id: str, max_messages: int = 20) -> Li
     set_memory_cache(cache_key, history)
     
     return history
+
+def strip_markdown(text: str) -> str:
+    """Remove markdown formatting symbols from text for TTS"""
+    # Replace bold text (**text**) with just the text
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    # Replace italic text (*text*) with just the text
+    text = re.sub(r'\*(.*?)\*', r'\1', text)
+    return text
