@@ -983,7 +983,7 @@ async def retrieve_visit_planning_context(state: CustomerState) -> CustomerState
            FROM engagements e 
            LEFT JOIN brands b ON e.brand_id = b.brand_id
            WHERE e.unique_property_id = $1 AND 
-           e.type = 'event' AND
+           e.type = 'events' AND
            (e.end_date >= $2 OR e.end_date IS NULL)
            ORDER BY e.start_date ASC
            LIMIT 5""",
@@ -1289,7 +1289,7 @@ async def refine_context(state: CustomerState) -> CustomerState:
             }
             context["offers"].append(offer_data)
         
-        elif engagement_type == "event":
+        elif engagement_type == "events":
             event_data = {
                 "id": engagement["engagement_id"],
                 "name": engagement.get("title_en", ""),
