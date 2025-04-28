@@ -836,17 +836,23 @@ async def retrieve_family_planning_context(state: CustomerState) -> CustomerStat
             })
 
     # Fetch services like play areas, nursing rooms, family restrooms
+    # family_services = await db_fetch_all_async(
+        # """SELECT s.id, s.name, s.description, s.location, s.is_available
+        #    FROM services s
+        #    WHERE s.unique_property_id = $1 AND 
+        #    (LOWER(s.name) LIKE '%family%' OR 
+        #     LOWER(s.name) LIKE '%kid%' OR 
+        #     LOWER(s.name) LIKE '%child%' OR
+        #     LOWER(s.name) LIKE '%play%' OR
+        #     LOWER(s.name) LIKE '%baby%' OR
+        #     LOWER(s.name) LIKE '%stroller%' OR
+        #     LOWER(s.name) LIKE '%nursing%')""",
+    #     (state.mall_id,)
+    # )
     family_services = await db_fetch_all_async(
-        """SELECT s.id, s.name, s.description, s.location, s.is_available
+        """SELECT s.id, s.name, s.description, s.description_ar, s.location, s.is_available
            FROM services s
-           WHERE s.unique_property_id = $1 AND 
-           (LOWER(s.name) LIKE '%family%' OR 
-            LOWER(s.name) LIKE '%kid%' OR 
-            LOWER(s.name) LIKE '%child%' OR
-            LOWER(s.name) LIKE '%play%' OR
-            LOWER(s.name) LIKE '%baby%' OR
-            LOWER(s.name) LIKE '%stroller%' OR
-            LOWER(s.name) LIKE '%nursing%')""",
+           WHERE s.unique_property_id = $1""",
         (state.mall_id,)
     )
     
@@ -855,6 +861,7 @@ async def retrieve_family_planning_context(state: CustomerState) -> CustomerStat
             "type": "service",
             "name": service.get("name", ""),
             "description": service.get("description", ""),
+            "description_ar": service.get("description_ar", ""),
             "location": service.get("location", ""),
             "is_available": service.get("is_available", True),
             "mall_id": state.mall_id,
