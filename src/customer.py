@@ -215,6 +215,13 @@ customer_prompt = PromptTemplate(
     - Use bullet points for lists to improve readability
     - Responses should feel natural in both text and voice formats - imagine someone listening to your response
 
+    # Image Handling (IMPORTANT)
+    - When mentioning brands, stores, offers, events, services, or products that have image_url data, ALWAYS include the image
+    - Use markdown image format: ![Description](image_url)
+    - Place the image after mentioning the brand/store/offer/product - typically at the end of the bullet point
+    - Only include images when there is a valid image_url in the data (not null, not empty string)
+    - If multiple items have images, include at most one image per item
+
     # Location Format Rules
     - NEVER include raw location codes like "FF", "GF", "BSW" in your responses
     - Always convert these codes to human-readable descriptions:
@@ -272,8 +279,9 @@ customer_prompt = PromptTemplate(
     Respond in {lang} in a friendly, conversational tone. Your response should be structured to work well for both text and voice:
     
     1. Direct answer with only the most important details (1-3 bullets if listing items)
-    2. For turn 1 only: ONE simple follow-up question
-    3. For turn 2+: Brief, friendly closing (no questions)
+    2. Include relevant images using markdown format when available (![Description](image_url))
+    3. For turn 1 only: ONE simple follow-up question
+    4. For turn 2+: Brief, friendly closing (no questions)
     """
 )
 
@@ -1184,7 +1192,7 @@ async def retrieve_fallback_context(state: CustomerState) -> CustomerState:
     
     return state
 
-# Add this function before the refine_context function
+# Add this function before the refine_context function to process location codes
 def convert_location_codes(location_data):
     """Convert raw location codes to human-readable format"""
     if not location_data:
@@ -1282,7 +1290,8 @@ async def refine_context(state: CustomerState) -> CustomerState:
     current_date = datetime.now().isoformat()
     engagements = await db_fetch_all_async(
         """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
-           e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, e.unique_property_id
+           e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, e.unique_property_id,
+           e.images_en, e.images_ar
            FROM engagements e 
            WHERE e.unique_property_id = $1 AND 
            (e.end_date >= $2 OR e.end_date IS NULL)""",
@@ -1300,6 +1309,21 @@ async def refine_context(state: CustomerState) -> CustomerState:
         
         engagement_type = engagement.get("type", "").lower()
         
+        # Extract image URLs
+        image_url = None
+        if state.language == "ar" and engagement.get("images_ar"):
+            # Try to get Arabic image if language is Arabic
+            if isinstance(engagement["images_ar"], str):
+                image_url = engagement["images_ar"]
+            elif isinstance(engagement["images_ar"], list) and len(engagement["images_ar"]) > 0:
+                image_url = engagement["images_ar"][0]  # Take the first image if multiple exist
+        elif engagement.get("images_en"):
+            # Use English image as fallback
+            if isinstance(engagement["images_en"], str):
+                image_url = engagement["images_en"]
+            elif isinstance(engagement["images_en"], list) and len(engagement["images_en"]) > 0:
+                image_url = engagement["images_en"][0]  # Take the first image if multiple exist
+        
         if engagement_type == "offer":
             offer_data = {
                 "id": engagement["engagement_id"],
@@ -1311,7 +1335,8 @@ async def refine_context(state: CustomerState) -> CustomerState:
                 "start_date": engagement.get("start_date", ""),
                 "end_date": engagement.get("end_date", ""),
                 "terms": engagement.get("terms_conditions_en", ""),
-                "is_exclusive": bool(engagement.get("is_exclusive", 0))
+                "is_exclusive": bool(engagement.get("is_exclusive", 0)),
+                "image_url": image_url
             }
             context["offers"].append(offer_data)
         
@@ -1324,7 +1349,8 @@ async def refine_context(state: CustomerState) -> CustomerState:
                 "store_name": brand["brand_name_en"] if brand else None,
                 "start_date": engagement.get("start_date", ""),
                 "end_date": engagement.get("end_date", ""),
-                "terms": engagement.get("terms_conditions_en", "")
+                "terms": engagement.get("terms_conditions_en", ""),
+                "image_url": image_url
             }
             context["events"].append(event_data)
 
@@ -1335,7 +1361,8 @@ async def refine_context(state: CustomerState) -> CustomerState:
     # Always fetch all stores for complete data
     all_stores = await db_fetch_all_async(
         """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
-           b.store_phone_number, b.store_email, b.store_website, b.pms_unit_codes
+           b.store_phone_number, b.store_email, b.store_website, b.pms_unit_codes,
+           b.brand_logo, b.banner_en, b.banner_ar
            FROM brands b 
            JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
            WHERE bma.unique_property_id = $1""", 
@@ -1345,6 +1372,17 @@ async def refine_context(state: CustomerState) -> CustomerState:
     food_related_categories = ['restaurant', 'cafe', 'food', 'dining', 'bakery', 'coffee']
     
     for store in all_stores:
+        # Extract image URLs
+        image_url = None
+        # First try brand logo as it's usually the most relevant
+        if store.get("brand_logo"):
+            image_url = store["brand_logo"]
+        # Then try banner based on language
+        elif state.language == "ar" and store.get("banner_ar"):
+            image_url = store["banner_ar"]
+        elif store.get("banner_en"):
+            image_url = store["banner_en"]
+            
         store_data = {
             "name": store["brand_name_en"],
             "category": store.get("category_name", ""),
@@ -1353,7 +1391,8 @@ async def refine_context(state: CustomerState) -> CustomerState:
             "phone": store.get("store_phone_number", ""),
             "email": store.get("store_email", ""),
             "website": store.get("store_website", ""),
-            "location": store.get("pms_unit_codes", {})
+            "location": store.get("pms_unit_codes", {}),
+            "image_url": image_url
         }
         
         # Add to category lists
@@ -1432,7 +1471,7 @@ async def refine_context(state: CustomerState) -> CustomerState:
     
     # Fetch service information using the correct column names from DB schema
     services = await db_fetch_all_async(
-        """SELECT s.id AS service_id, s.name, s.description, s.location, s.is_available
+        """SELECT s.id AS service_id, s.name, s.description, s.description_ar, s.location, s.is_available, s.icon_url
            FROM services s
            WHERE s.unique_property_id = $1""",
         (state.mall_id,)
@@ -1442,8 +1481,10 @@ async def refine_context(state: CustomerState) -> CustomerState:
         service_data = {
             "name": service.get("name", ""),
             "description": service.get("description", ""),
+            "description_ar": service.get("description_ar", ""),
             "location": service.get("location", ""),
-            "is_available": service.get("is_available", True)
+            "is_available": service.get("is_available", True),
+            "image_url": service.get("icon_url")
         }
         context["services"].append(service_data)
     
@@ -1455,7 +1496,7 @@ async def refine_context(state: CustomerState) -> CustomerState:
         if product_name:
             products = await db_fetch_all_async(
                 """SELECT p.id, p.name, p.description, p.price, p.category, p.brand_id, 
-                   p.is_featured, p.in_stock, b.brand_name_en
+                   p.is_featured, p.in_stock, b.brand_name_en, b.brand_logo
                    FROM products p
                    JOIN brands b ON p.brand_id = b.brand_id
                    JOIN brand_mall_association bma ON b.brand_id = bma.brand_id
@@ -1466,7 +1507,7 @@ async def refine_context(state: CustomerState) -> CustomerState:
         else:
             products = await db_fetch_all_async(
                 """SELECT p.id, p.name, p.description, p.price, p.category, p.brand_id, 
-                   p.is_featured, p.in_stock, b.brand_name_en
+                   p.is_featured, p.in_stock, b.brand_name_en, b.brand_logo
                    FROM products p
                    JOIN brands b ON p.brand_id = b.brand_id
                    JOIN brand_mall_association bma ON b.brand_id = bma.brand_id
@@ -1488,7 +1529,8 @@ async def refine_context(state: CustomerState) -> CustomerState:
                 "brand_id": product["brand_id"],
                 "category": product_category,
                 "store_name": product.get("brand_name_en", ""),
-                "in_stock": product.get("in_stock", True)
+                "in_stock": product.get("in_stock", True),
+                "image_url": product.get("brand_logo")  # Use brand logo for product image
             })
 
     # Process Pinecone results for other entities that might be relevant
@@ -1510,6 +1552,7 @@ async def refine_context(state: CustomerState) -> CustomerState:
                 "category": store_category,
                 "store_id": metadata.get("brand_id"),
                 "description": metadata.get("description_en"),
+                "image_url": metadata.get("brand_logo") or metadata.get("banner_en")
             }
             if not any(s.get("name") == store["name"] for s in context["stores"]):
                 context["stores"].append(store)
@@ -1528,6 +1571,7 @@ async def refine_context(state: CustomerState) -> CustomerState:
                 "brand_id": metadata.get("brand_id"),
                 "category": product_category,
                 "store_name": metadata.get("brand_name_en"),
+                "image_url": metadata.get("image_url")
             }
             if not any(p.get("name") == product["name"] for p in context["products"]):
                 context["products"].append(product)
@@ -1538,7 +1582,8 @@ async def refine_context(state: CustomerState) -> CustomerState:
             service = {
                 "name": metadata.get("name"),
                 "description": metadata.get("description"),
-                "location": metadata.get("location")
+                "location": metadata.get("location"),
+                "image_url": metadata.get("icon_url")
             }
             if not any(s.get("name") == service["name"] for s in context["services"]):
                 context["services"].append(service)
@@ -1547,7 +1592,8 @@ async def refine_context(state: CustomerState) -> CustomerState:
     if brand_ids:
         brands = await db_fetch_all_async(
             """SELECT brand_id, brand_name_en, category_name, description_en, 
-               store_phone_number, store_email, store_website, pms_unit_codes 
+               store_phone_number, store_email, store_website, pms_unit_codes,
+               brand_logo, banner_en, banner_ar 
                FROM brands WHERE brand_id = ANY($1)""",
             (list(brand_ids),)
         )
@@ -1562,13 +1608,16 @@ async def refine_context(state: CustomerState) -> CustomerState:
                     context["category_types"]["product"].add(brand["category_name"].lower())
                 if "location" not in item and brand.get("pms_unit_codes"):
                     item["location"] = brand["pms_unit_codes"]
+                if "image_url" not in item or not item["image_url"]:
+                    item["image_url"] = brand["brand_logo"] or brand["banner_en"] or brand["banner_ar"]
 
     # If no stores found but resolved entity exists, try a direct DB lookup
     if not context["stores"] and state.context_data and state.context_data.get("resolved_entity"):
         store_name = state.context_data["resolved_entity"].lower()
         stores = await db_fetch_all_async(
             """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
-               b.store_phone_number, b.store_email, b.store_website, b.pms_unit_codes
+               b.store_phone_number, b.store_email, b.store_website, b.pms_unit_codes,
+               b.brand_logo, b.banner_en, b.banner_ar
                FROM brands b 
                JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
                WHERE bma.unique_property_id = $1 AND LOWER(b.brand_name_en) LIKE $2""", 
@@ -1580,6 +1629,15 @@ async def refine_context(state: CustomerState) -> CustomerState:
             if store_category:
                 context["category_types"]["store"].add(store_category)
                 
+            # Extract image URL (prioritize brand logo, then banners)
+            image_url = None
+            if store.get("brand_logo"):
+                image_url = store["brand_logo"]
+            elif state.language == "ar" and store.get("banner_ar"):
+                image_url = store["banner_ar"]
+            elif store.get("banner_en"):
+                image_url = store["banner_en"]
+                
             context["stores"].append({
                 "name": store["brand_name_en"],
                 "category": store_category,
@@ -1588,7 +1646,8 @@ async def refine_context(state: CustomerState) -> CustomerState:
                 "phone": store.get("store_phone_number", ""),
                 "email": store.get("store_email", ""),
                 "website": store.get("store_website", ""),
-                "location": store.get("pms_unit_codes", {})
+                "location": store.get("pms_unit_codes", {}),
+                "image_url": image_url
             })
     
     # Filter results based on type_preference if provided
@@ -1755,13 +1814,32 @@ async def generate_response(state: CustomerState) -> CustomerState:
         recommendations = []
         follow_up_question = None
         
+        # Helper function to extract image URLs from markdown format
+        def extract_images_from_markdown(text):
+            import re
+            # Match markdown image pattern: ![alt text](url)
+            image_pattern = r"!\[(.*?)\]\((.*?)\)"
+            images = re.findall(image_pattern, text)
+            # Return a list of tuples (alt_text, url)
+            return images
+        
+        # Extract all images from the response
+        all_images = extract_images_from_markdown(response)
+        
+        # Create a clean response without image markdown
+        clean_response = response
+        if all_images:
+            for alt_text, url in all_images:
+                # Remove the markdown image from the clean response
+                clean_response = clean_response.replace(f"![{alt_text}]({url})", "").strip()
+        
         # Determine if we need to format as a recommendation list
         if state.intent and state.intent in ["product_list", "store_list", "offer_list", "product_recommend", "store_recommend", "offer_recommend"]:
             needs_recommendation_format = True
             
             # Extract recommendations and follow-up question from the response
             # Parse bullet points or numbered lists
-            lines = response.split('\n')
+            lines = clean_response.split('\n')
             content_lines = []
             question_line = None
             
@@ -1793,9 +1871,16 @@ async def generate_response(state: CustomerState) -> CustomerState:
                     # Split into title and description if possible
                     if ':' in clean_line:
                         title, desc = clean_line.split(':', 1)
-                        recommendations.append({"title": title.strip(), "description": desc.strip()})
+                        rec = {"title": title.strip(), "description": desc.strip()}
                     else:
-                        recommendations.append({"title": clean_line, "description": ""})
+                        rec = {"title": clean_line, "description": ""}
+                    
+                    # Add image URL if available for this recommendation
+                    # Match an image to this recommendation if possible
+                    if all_images and i < len(all_images):
+                        rec["image_url"] = all_images[i][1]  # Use the URL from the image tuple
+                    
+                    recommendations.append(rec)
             
             follow_up_question = question_line
             
@@ -1806,7 +1891,7 @@ async def generate_response(state: CustomerState) -> CustomerState:
         
         # Create formatted response
         response_format = ResponseFormat(
-            response=response,
+            response=clean_response,
             recommendations=recommendations if needs_recommendation_format else None,
             is_recommendation_format=needs_recommendation_format,
             follow_up_question=follow_up_question

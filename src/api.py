@@ -25,6 +25,7 @@ import uuid
 from io import BytesIO
 import functools
 import concurrent.futures
+import re
 
 app = FastAPI()
 app.add_middleware(
@@ -71,6 +72,7 @@ class ChatResponse(BaseModel):
     recommendations: Optional[List[Dict[str, str]]] = None
     is_recommendation_format: bool = False
     follow_up_question: Optional[str] = None
+    images: Optional[List[Dict[str, str]]] = None
 
 class UpdateRequest(BaseModel):
     text: str
@@ -361,11 +363,29 @@ async def chat(request: ChatRequest):
             else:
                 tts_task = None
 
+        # Extract image URLs from markdown in the response
+        def extract_images_from_markdown(text):
+            # Match markdown image pattern: ![alt text](url)
+            image_pattern = r"!\[(.*?)\]\((.*?)\)"
+            images = re.findall(image_pattern, text)
+            # Return a list of dicts with alt_text and url
+            return [{"alt_text": alt, "url": url} for alt, url in images]
+            
+        # Get images from the response
+        images = extract_images_from_markdown(result["response"])
+            
+        # Create a clean response without image markdown
+        clean_response = result["response"]
+        for img in images:
+            # Remove the markdown image from the clean response
+            clean_response = clean_response.replace(f"![{img['alt_text']}]({img['url']})", "").strip()
+
         # Prepare the response for caching
         response_data = {
-            "message": result["response"],
+            "message": clean_response,
             "conversation_id": conversation_id,
-            "audio_base64": None
+            "audio_base64": None,
+            "images": images if images else None
         }
         
         # Add recommendation formatting if available
@@ -440,7 +460,8 @@ async def chat(request: ChatRequest):
             "recommendations": None,
             "is_recommendation_format": False,
             "follow_up_question": None,
-            "audio_base64": None
+            "audio_base64": None,
+            "images": None
         }
         
         logger.error(f"CHAT ERROR DETAILS: {str(e)}")
