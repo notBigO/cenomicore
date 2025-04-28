@@ -85,16 +85,21 @@ class LoginRequest(BaseModel):
 class TTSRequest(BaseModel):
     text: str
     language: str = "en"
+    speed: Optional[float] = None  # Optional speed parameter (0.7 to 1.2)
 
 # Cache TTS responses with in-memory fast cache before Redis
 TTS_CACHE = {}
 TTS_CACHE_MAX_SIZE = 50
 
-async def generate_speech(text: str, language: str = "en") -> bytes:
+from pydub import AudioSegment
+from io import BytesIO
+
+async def generate_speech(text: str, language: str = "en", speed: Optional[float] = None) -> bytes:
     # Strip markdown symbols from text for TTS
     clean_text = strip_markdown(text)
     
-    cache_key = f"tts:{clean_text}:{language}"
+    # Include speed in cache key to differentiate audio with different speeds
+    cache_key = f"tts:{clean_text}:{language}:{speed or 'default'}"
     
     # Check memory cache first (fastest)
     mem_cached = get_memory_cache(cache_key)
@@ -111,11 +116,20 @@ async def generate_speech(text: str, language: str = "en") -> bytes:
             return redis_cached
     
     # Cache miss - generate new audio
-    # Use different voices for different languages
     voice_id = "21m00Tcm4TlvDq8ikWAM"  # Default English voice (Rachel)
+    voice_settings = {
+        "stability": 0.5,
+        "similarity_boost": 0.5,
+    }
     
     if language == "ar":
-        voice_id = "jsCqWAovK2LkecY7zXl4"  # Arabic voice (Salma)
+        voice_id = "jsCqWAovK2LkecY7zXl4"  # Arabic voice (Salma, female)
+        voice_settings = {
+            "stability": 0.9,  # Increased for more consistency
+            "similarity_boost": 0.9,  # Increased for more consistency
+            "speed": speed if speed is not None else 0.7,  # Default to 0.8 for Arabic
+            "seed": 42  # Fixed seed for deterministic output
+        }
     
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     headers = {
@@ -125,10 +139,11 @@ async def generate_speech(text: str, language: str = "en") -> bytes:
     data = {
         "text": clean_text,
         "model_id": "eleven_monolingual_v1" if language == "en" else "eleven_multilingual_v2",
-        "voice_settings": {"stability": 0.5, "similarity_boost": 0.5}
+        "voice_settings": voice_settings
     }
     
-    def _make_request():
+    def _make_request(text_segment):
+        data["text"] = text_segment
         try:
             response = requests.post(url, headers=headers, json=data)
             response.raise_for_status()
@@ -138,7 +153,26 @@ async def generate_speech(text: str, language: str = "en") -> bytes:
             raise HTTPException(status_code=500, detail=f"TTS generation failed: {str(e)}")
     
     try:
-        audio_data = await asyncio.to_thread(_make_request)
+        # Log details for debugging
+        logger.info(f"Generating speech for language: {language}, speed: {voice_settings.get('speed', 'default')}, text length: {len(clean_text)}")
+        
+        if len(clean_text) > 4000:  # Updated threshold to 4000 characters
+            segments = [clean_text[i:i+4000] for i in range(0, len(clean_text), 4000)]
+            audio_segments = []
+            for segment in segments:
+                logger.info(f"Generating segment: {segment[:20]}..., speed: {voice_settings.get('speed', 'default')}")
+                segment_audio_bytes = await asyncio.to_thread(_make_request, segment)
+                segment_audio = AudioSegment.from_mp3(BytesIO(segment_audio_bytes))
+                audio_segments.append(segment_audio)
+            # Properly concatenate audio segments
+            combined_audio = AudioSegment.empty()
+            for segment in audio_segments:
+                combined_audio += segment
+            output = BytesIO()
+            combined_audio.export(output, format="mp3")
+            audio_data = output.getvalue()
+        else:
+            audio_data = await asyncio.to_thread(_make_request, clean_text)
         
         # Cache the result in both Redis and memory
         redis_client.set(cache_key, audio_data, ex=LONG_CACHE_TTL)  # 1 hour cache
@@ -152,7 +186,12 @@ async def generate_speech(text: str, language: str = "en") -> bytes:
 @app.post("/tts")
 async def tts(request: TTSRequest):
     try:
-        audio_data = await generate_speech(request.text, request.language)
+        # Validate speed if provided
+        if request.speed is not None:
+            if not (0.7 <= request.speed <= 1.2):
+                raise HTTPException(status_code=400, detail="Speed must be between 0.7 and 1.2")
+        
+        audio_data = await generate_speech(request.text, request.language, speed=request.speed)
         audio_base64 = base64.b64encode(audio_data).decode("utf-8")
         return {"audio_base64": audio_base64, "media_type": "audio/mpeg"}
     except Exception as e:
@@ -263,10 +302,12 @@ async def chat(request: ChatRequest):
                     return "en"
             language = await asyncio.to_thread(detect_lang)
         
+        # Log detected language
+        logger.info(f"Detected language: {language}")
+        
         # Create or get conversation and fetch initial data in parallel
         tasks = [
             get_or_create_conversation(request.conversation_id, request.user_id, language),
-            # Other tasks will be added after we have conversation_id
         ]
         
         # Get the conversation ID first
@@ -285,7 +326,6 @@ async def chat(request: ChatRequest):
         state_data = {}
         if conv_data and conv_data.get("meta_data"):
             try:
-                # Parse JSON only once
                 meta_data = json.loads(conv_data["meta_data"])
                 if "state" in meta_data:
                     state_data = meta_data["state"]
@@ -307,16 +347,19 @@ async def chat(request: ChatRequest):
             **state_data
         )
 
-        # Start TTS generation early if needed
-        tts_task = None
-        
         # Process the request through the graph
         with trace(name="CustomerChat", inputs={"query": text, "user_id": request.user_id, "mall_id": request.mall_id}):
             result = await customer_graph.ainvoke(state)
             
-            # If TTS is requested, start generating it as soon as we have the response
+            # Log response text
+            logger.info(f"Response text: {result['response'][:50]}...")
+            
+            # If TTS is requested, start generating it with the appropriate speed
             if request.include_tts and result["response"]:
-                tts_task = generate_speech(result["response"], language)
+                tts_speed = 0.7 if language == "ar" else None
+                tts_task = generate_speech(result["response"], language, speed=tts_speed)
+            else:
+                tts_task = None
 
         # Prepare the response for caching
         response_data = {
@@ -352,11 +395,9 @@ async def chat(request: ChatRequest):
         # Ensure response_format is serializable before storing in metadata
         if "response_format" in result and result["response_format"] is not None:
             if not isinstance(result["response_format"], dict):
-                # Convert to dict if it's not already (handles Pydantic object)
                 try:
                     result["response_format"] = dict(result["response_format"])
                 except (TypeError, ValueError):
-                    # If conversion fails, create a basic dict
                     result["response_format"] = {
                         "response": result["response"],
                         "is_recommendation_format": False
@@ -393,7 +434,6 @@ async def chat(request: ChatRequest):
     except Exception as e:
         logger.error(f"Error processing chat request: {e}")
         
-        # Create a graceful error response without exposing the technical details
         response_data = {
             "message": "I'm sorry, I'm having trouble understanding that right now. Could you try rephrasing your question?",
             "conversation_id": request.conversation_id or str(uuid.uuid4()),
@@ -403,7 +443,6 @@ async def chat(request: ChatRequest):
             "audio_base64": None
         }
         
-        # Log detailed error for debugging
         logger.error(f"CHAT ERROR DETAILS: {str(e)}")
         
         return ChatResponse(**response_data)
