@@ -27,7 +27,8 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 pc = Pinecone(api_key=PINECONE_API_KEY)
 
 # Check if index exists and create it if not
-INDEX_NAME = "cenomicore"
+# INDEX_NAME = "cenomicore"
+INDEX_NAME = "cenomiprod"
 existing_indexes = pc.list_indexes().names()
 if INDEX_NAME not in existing_indexes:
     pc.create_index(

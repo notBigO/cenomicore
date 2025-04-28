@@ -25,7 +25,8 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 if not PINECONE_API_KEY:
     raise ValueError("PINECONE_API_KEY environment variable is not set")
 pc = Pinecone(api_key=PINECONE_API_KEY)
-index = pc.Index("cenomicore")
+# index = pc.Index("cenomicore")
+index = pc.Index("cenomiprod")
 
 # Embeddings
 embeddings = HuggingFaceEmbeddings(model_name="paraphrase-multilingual-MiniLM-L12-v2")

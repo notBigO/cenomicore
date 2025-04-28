@@ -282,14 +282,38 @@ def generate_products_for_brand(brand):
         # Beauty and cosmetics categories
         "Cosmetics": ["Liquid Foundation", "Eyeshadow Palette", "Lipstick Collection", "Mascara", "Skincare Set"],
         "Pharmacy": ["Vitamin Supplements", "Skincare Products", "Hair Care Set", "Personal Care Kit", "First Aid Essentials"],
+        "Beauty salon": ["Premium Hair Treatment", "Signature Facial", "Manicure Set", "Spa Package", "Beauty Gift Box"],
+        "Perfumes": ["Signature Fragrance", "Limited Edition Perfume", "Cologne Collection", "Gift Set", "Body Mist"],
+        "Skincare": ["Anti-Aging Serum", "Hydrating Cream", "Facial Cleanser", "Essence Treatment", "Sheet Mask Set"],
         
         # Specialty retail categories
         "Watches": ["Luxury Watch", "Sports Chronograph", "Classic Timepiece", "Smart Watch", "Limited Edition Collection"],
         "Optical": ["Designer Eyeglasses", "Prescription Sunglasses", "Contact Lenses Pack", "Blue Light Glasses", "Reading Glasses"],
         "Electronic games": ["Console Game", "Gaming Headset", "Controller", "Gaming Keyboard", "Virtual Reality Set"],
+        "Jewelry": ["Diamond Necklace", "Gold Bracelet", "Designer Earrings", "Engagement Ring", "Luxury Watch"],
+        "Electronics": ["Smartphone", "Wireless Earbuds", "Smart Speaker", "Tablet", "Laptop"],
+        "Bookstore": ["Bestseller Novel", "Coffee Table Book", "Educational Series", "Stationery Set", "Premium Journal"],
+        "Toys": ["Educational Toy", "Action Figure", "Board Game", "Building Blocks", "Interactive Plush"],
+        
+        # Home and furniture categories
+        "Home decor": ["Decorative Vase", "Luxury Throw Pillow", "Wall Art", "Designer Lamp", "Scented Candle Set"],
+        "Kitchen & dining": ["Premium Cookware Set", "Chef's Knife", "Luxury Dinnerware", "Coffee Machine", "Baking Essentials"],
+        "Furniture": ["Designer Sofa", "Dining Table Set", "Luxury Bed Frame", "Office Desk", "Accent Chair"],
         
         # Food categories
-        "Chicken Cuisine": ["Signature Chicken Meal", "Family Bucket", "Spicy Wings", "Chicken Sandwich", "Combo Meal"]
+        "Chicken Cuisine": ["Signature Chicken Meal", "Family Bucket", "Spicy Wings", "Chicken Sandwich", "Combo Meal"],
+        "Fine dining": ["Signature Entrée", "Chef's Special", "Wine Pairing", "Dessert Selection", "Tasting Menu"],
+        "Café": ["Specialty Coffee", "Signature Pastry", "Breakfast Set", "Sandwich Selection", "Dessert Platter"],
+        "Ice cream": ["Premium Gelato", "Signature Sundae", "Ice Cream Cake", "Seasonal Flavor Pack", "Dairy-Free Option"],
+        "Fast food": ["Signature Burger", "Pizza Combo", "Meal Deal", "Premium Sandwich", "Family Pack"],
+        "Health food": ["Superfood Bowl", "Protein Smoothie", "Organic Salad", "Grain Bowl", "Vegan Dessert"],
+        
+        # Additional fashion categories
+        "Men's fashion": ["Designer Suit", "Premium Shirt", "Casual Ensemble", "Luxury Sweater", "Designer Jeans"],
+        "Women's fashion": ["Designer Dress", "Premium Blouse", "Luxury Skirt", "Cashmere Sweater", "Evening Gown"],
+        "Sportswear": ["Performance Leggings", "Training Top", "Fitness Accessory", "Running Shoes", "Sports Bra"],
+        "Children's clothing": ["Kids Designer Set", "Baby Collection", "School Outfit", "Seasonal Wear", "Special Occasion Outfit"],
+        "Footwear": ["Designer Sneakers", "Luxury Loafers", "Premium Boots", "Comfort Sandals", "Athletic Shoes"]
     }
     
     # Define attribute generators based on product type
@@ -363,6 +387,55 @@ def generate_products_for_brand(brand):
             "volume_weight": f"{random.randint(5, 200)}{'ml' if 'Liquid' in product_type or 'Set' in product_type else 'g'}",
             "application": random.choice(["Easy application with fingertips", "Use with beauty blender", "Apply with brush", "Gently tap onto skin"]),
             "benefits": random.sample(["Hydrating", "Long-lasting", "Cruelty-free", "Paraben-free", "Vegan", "Dermatologically tested", "Non-comedogenic"], random.randint(2, 5))
+        }
+    
+    def generate_perfume_attributes():
+        return {
+            "scent_family": random.choice(["Floral", "Oriental", "Woody", "Fresh", "Fruity", "Citrus", "Spicy", "Aquatic"]),
+            "concentration": random.choice(["Eau de Parfum", "Eau de Toilette", "Parfum", "Eau Fraiche", "Cologne"]),
+            "volume": f"{random.choice(['30', '50', '75', '100', '125'])}ml",
+            "notes": {
+                "top": random.sample(["Bergamot", "Lemon", "Orange", "Apple", "Lavender", "Rose", "Jasmine"], random.randint(1, 3)),
+                "middle": random.sample(["Ylang-ylang", "Lily", "Cinnamon", "Cardamom", "Cedar", "Geranium"], random.randint(1, 3)),
+                "base": random.sample(["Musk", "Vanilla", "Sandalwood", "Amber", "Patchouli", "Vetiver"], random.randint(1, 3))
+            },
+            "occasion": random.choice(["Everyday", "Evening", "Special Occasion", "Formal", "Casual"]),
+            "gender": random.choice(["Men", "Women", "Unisex"])
+        }
+    
+    def generate_home_decor_attributes():
+        colors = ["White", "Black", "Gold", "Silver", "Natural", "Beige", "Grey", "Blue", "Green", "Terracotta"]
+        materials = ["Ceramic", "Glass", "Metal", "Wood", "Cotton", "Linen", "Polyester", "Velvet", "Marble", "Brass"]
+        return {
+            "color": random.choice(colors),
+            "material": random.choice(materials),
+            "style": random.choice(["Modern", "Traditional", "Scandinavian", "Bohemian", "Industrial", "Minimalist", "Rustic", "Art Deco"]),
+            "dimensions": f"{random.randint(10, 100)}cm x {random.randint(10, 100)}cm" if "Pillow" not in product_type and "Candle" not in product_type else f"{random.randint(10, 50)}cm",
+            "care_instructions": "Wipe clean with a soft, dry cloth. Avoid using harsh chemicals.",
+            "occasion": random.choice(["Everyday use", "Special occasion", "Holiday", "Seasonal", "Gift"])
+        }
+    
+    def generate_furniture_attributes():
+        colors = ["Natural Wood", "Walnut", "Oak", "White", "Black", "Grey", "Navy", "Green", "Beige"]
+        materials = ["Solid Wood", "Engineered Wood", "Metal", "Glass", "Upholstered", "Leather", "Fabric", "Velvet", "Rattan"]
+        return {
+            "color": random.choice(colors),
+            "material": random.choice(materials),
+            "style": random.choice(["Modern", "Traditional", "Scandinavian", "Mid-Century", "Industrial", "Minimalist", "Rustic", "Contemporary"]),
+            "dimensions": f"{random.randint(50, 200)}cm x {random.randint(50, 200)}cm x {random.randint(40, 100)}cm",
+            "weight": f"{random.randint(10, 100)}kg",
+            "assembly_required": random.choice([True, False]),
+            "max_weight_capacity": f"{random.randint(100, 300)}kg" if "Chair" in product_type or "Sofa" in product_type or "Bed" in product_type else None
+        }
+    
+    def generate_food_attributes():
+        return {
+            "serving_size": f"{random.randint(1, 4)} person(s)",
+            "calories": f"{random.randint(200, 1500)} kcal" if "Set" not in product_type else "Varies by item",
+            "preparation": random.choice(["Ready to eat", "Heat and serve", "Cook from fresh", "Preparation required"]),
+            "dietary_options": random.sample(["Vegetarian", "Contains meat", "Dairy-free", "Gluten-free", "Vegan", "Low-calorie", "Organic", "Halal"], random.randint(1, 3)),
+            "allergens": random.sample(["May contain nuts", "Contains gluten", "Contains dairy", "Contains eggs", "Soy-free"], random.randint(0, 3)),
+            "shelf_life": f"{random.randint(1, 14)} days" if "Fresh" in product_type else f"{random.randint(1, 12)} months"
         }
     
     def generate_eyewear_attributes():
@@ -439,20 +512,28 @@ def generate_products_for_brand(brand):
         attributes = generate_generic_attributes()  # Base attributes for all products
         
         # Add specific attributes based on category/product type
-        if "Shoes" in product_type or "Sandals" in product_type or "Boots" in product_type or "Flats" in product_type or "Footwear" in product_type:
+        if "Shoes" in product_type or "Sandals" in product_type or "Boots" in product_type or "Flats" in product_type or "Footwear" in product_type or "Sneakers" in product_type:
             attributes.update(generate_footwear_attributes())
-        elif "T-Shirt" in product_type or "Jacket" in product_type or "Shorts" in product_type or "Pajama" in product_type or "Robe" in product_type or "Thobe" in product_type:
+        elif "T-Shirt" in product_type or "Jacket" in product_type or "Shorts" in product_type or "Pajama" in product_type or "Robe" in product_type or "Thobe" in product_type or "Suit" in product_type or "Shirt" in product_type or "Dress" in product_type or "Sweater" in product_type or "Skirt" in product_type or "Blouse" in product_type or "Leggings" in product_type:
             attributes.update(generate_clothing_attributes())
-        elif "Handbag" in product_type or "Wallet" in product_type or "Belt" in product_type or "Necklace" in product_type:
+        elif "Handbag" in product_type or "Wallet" in product_type or "Belt" in product_type or "Necklace" in product_type or "Accessory" in product_type:
             attributes.update(generate_accessory_attributes())
         elif "Watch" in product_type or "Timepiece" in product_type or "Chronograph" in product_type:
             attributes.update(generate_watch_attributes())
-        elif "Foundation" in product_type or "Eyeshadow" in product_type or "Lipstick" in product_type or "Mascara" in product_type or "Skincare" in product_type:
+        elif "Foundation" in product_type or "Eyeshadow" in product_type or "Lipstick" in product_type or "Mascara" in product_type or "Skincare" in product_type or "Serum" in product_type or "Cream" in product_type or "Cleanser" in product_type or "Essence" in product_type or "Mask" in product_type:
             attributes.update(generate_cosmetic_attributes())
-        elif "Eyeglasses" in product_type or "Sunglasses" in product_type or "Glasses" in product_type:
+        elif "Perfume" in product_type or "Fragrance" in product_type or "Cologne" in product_type or "Mist" in product_type:
+            attributes.update(generate_perfume_attributes())
+        elif "Eyeglasses" in product_type or "Sunglasses" in product_type or "Glasses" in product_type or "Contact" in product_type:
             attributes.update(generate_eyewear_attributes())
-        elif "Game" in product_type or "Headset" in product_type or "Controller" in product_type or "Keyboard" in product_type:
+        elif "Game" in product_type or "Headset" in product_type or "Controller" in product_type or "Keyboard" in product_type or "Smartphone" in product_type or "Earbuds" in product_type or "Speaker" in product_type or "Tablet" in product_type or "Laptop" in product_type:
             attributes.update(generate_electronics_attributes())
+        elif "Vase" in product_type or "Pillow" in product_type or "Art" in product_type or "Lamp" in product_type or "Candle" in product_type or "Decor" in product_type:
+            attributes.update(generate_home_decor_attributes())
+        elif "Sofa" in product_type or "Table" in product_type or "Bed" in product_type or "Desk" in product_type or "Chair" in product_type or "Furniture" in product_type:
+            attributes.update(generate_furniture_attributes())
+        elif "Meal" in product_type or "Bucket" in product_type or "Wings" in product_type or "Sandwich" in product_type or "Combo" in product_type or "Entrée" in product_type or "Special" in product_type or "Pairing" in product_type or "Dessert" in product_type or "Menu" in product_type or "Coffee" in product_type or "Pastry" in product_type or "Breakfast" in product_type or "Gelato" in product_type or "Sundae" in product_type or "Cake" in product_type or "Burger" in product_type or "Pizza" in product_type or "Deal" in product_type or "Bowl" in product_type or "Smoothie" in product_type or "Salad" in product_type:
+            attributes.update(generate_food_attributes())
         
         # Create the product
         product = {
@@ -596,20 +677,45 @@ async def seed_database():
         brand_objects = {}
         
         # Insert brands from al_nakheel
-        for brand_data in brands_data[0]:  
-            # Create a copy of brand_data and set default values if needed
-            brand_dict = dict(brand_data)
-            if 'is_published' not in brand_dict:
-                brand_dict['is_published'] = True
+        for brand_data in brands_data:  
+            if isinstance(brand_data, list):
+                for individual_brand in brand_data:
+                    # Check if brand already exists
+                    if individual_brand.get('brand_id') in brand_objects:
+                        print(f"Skipping duplicate brand: ID {individual_brand.get('brand_id')}")
+                        continue
+                        
+                    # Create a copy of brand_data and set default values if needed
+                    brand_dict = dict(individual_brand)
+                    if 'is_published' not in brand_dict:
+                        brand_dict['is_published'] = True
+                        
+                    brand = Brand(**brand_dict)
+                    db.add(brand)
+                    brand_objects[brand.brand_id] = brand
+                    
+                    # Associate brand with al_nakheel mall
+                    # Find the al_nakheel mall ID (assuming it's the first mall in the data)
+                    al_nakheel_id = malls_data[0]["unique_property_id"]
+                    mall_objects[al_nakheel_id].brands.append(brand)
+            else:
+                # Handle the case where brand_data is a single dict
+                if brand_data.get('brand_id') in brand_objects:
+                    print(f"Skipping duplicate brand: ID {brand_data.get('brand_id')}")
+                    continue
+                    
+                # Create a copy of brand_data and set default values if needed
+                brand_dict = dict(brand_data)
+                if 'is_published' not in brand_dict:
+                    brand_dict['is_published'] = True
+                    
+                brand = Brand(**brand_dict)
+                db.add(brand)
+                brand_objects[brand.brand_id] = brand
                 
-            brand = Brand(**brand_dict)
-            db.add(brand)
-            brand_objects[brand.brand_id] = brand
-            
-            # Associate brand with al_nakheel mall
-            # Find the al_nakheel mall ID (assuming it's the first mall in the data)
-            al_nakheel_id = malls_data[0]["unique_property_id"]
-            mall_objects[al_nakheel_id].brands.append(brand)
+                # Associate brand with al_nakheel mall
+                al_nakheel_id = malls_data[0]["unique_property_id"]
+                mall_objects[al_nakheel_id].brands.append(brand)
         
         # Insert brands from u_walk
         for brand_data in u_walk_brands_data:
@@ -638,16 +744,18 @@ async def seed_database():
         missing_brand_ids = []
         
         # Check al_nakheel engagement data
-        for engagement_item in engagement_data:
-            brand_id = engagement_item.get('brand_id')
-            if brand_id and brand_id not in brand_objects and brand_id not in missing_brand_ids:
-                missing_brand_ids.append(brand_id)
+        def extract_brand_ids(data):
+            if isinstance(data, dict) and 'brand_id' in data:
+                brand_id = data['brand_id']
+                if brand_id and brand_id not in brand_objects and brand_id not in missing_brand_ids:
+                    missing_brand_ids.append(brand_id)
+            elif isinstance(data, list):
+                for item in data:
+                    extract_brand_ids(item)
         
-        # Check u_walk engagement data
-        for engagement_item in u_walk_engagement_data:
-            brand_id = engagement_item.get('brand_id')
-            if brand_id and brand_id not in brand_objects and brand_id not in missing_brand_ids:
-                missing_brand_ids.append(brand_id)
+        # Process engagement data for both malls
+        extract_brand_ids(engagement_data)
+        extract_brand_ids(u_walk_engagement_data)
         
         # Create any missing brands needed for the engagements
         if missing_brand_ids:
@@ -675,42 +783,43 @@ async def seed_database():
         # Insert engagements and associate with their respective malls and brands
         successful_engagements = 0
         
-        # Insert engagements from al_nakheel
-        al_nakheel_id = malls_data[0]["unique_property_id"]
-        for engagement_data_item in engagement_data:
-            # Create a copy of engagement_data_item and set default values if needed
-            engagement_dict = dict(engagement_data_item)
-            if 'home_banner_disp' not in engagement_dict:
-                engagement_dict['home_banner_disp'] = 0
-                
-            engagement = Engagement(**engagement_dict, unique_property_id=al_nakheel_id)
-            db.add(engagement)
-            successful_engagements += 1
-        
-        # Insert engagements from u_walk
-        u_walk_id = u_walk_mall_data[0]["unique_property_id"]
-        
-        # Track engagement IDs that have already been added for u_walk mall to avoid duplicates
-        processed_engagement_ids = set()
-        
-        for engagement_data_item in u_walk_engagement_data:
-            # Skip if this engagement ID has already been processed for this mall
-            engagement_id = engagement_data_item["engagement_id"]
-            if engagement_id in processed_engagement_ids:
-                print(f"Skipping duplicate engagement: ID {engagement_id}")
-                continue
-                
-            # Mark this engagement ID as processed
-            processed_engagement_ids.add(engagement_id)
+        # Function to process engagements recursively
+        def process_engagements(data, mall_id, processed_ids=None):
+            nonlocal successful_engagements
             
-            # Create a copy of engagement_data_item and set default values if needed
-            engagement_dict = dict(engagement_data_item)
-            if 'home_banner_disp' not in engagement_dict:
-                engagement_dict['home_banner_disp'] = 0
+            if processed_ids is None:
+                processed_ids = set()
                 
-            engagement = Engagement(**engagement_dict, unique_property_id=u_walk_id)
-            db.add(engagement)
-            successful_engagements += 1
+            if isinstance(data, dict):
+                # For u_walk data, check for duplicates
+                if 'engagement_id' in data and processed_ids is not None:
+                    engagement_id = data['engagement_id']
+                    if engagement_id in processed_ids:
+                        print(f"Skipping duplicate engagement: ID {engagement_id}")
+                        return
+                    processed_ids.add(engagement_id)
+                
+                # Create a copy and set default values
+                engagement_dict = dict(data)
+                if 'home_banner_disp' not in engagement_dict:
+                    engagement_dict['home_banner_disp'] = 0
+                
+                engagement = Engagement(**engagement_dict, unique_property_id=mall_id)
+                db.add(engagement)
+                successful_engagements += 1
+                
+            elif isinstance(data, list):
+                for item in data:
+                    process_engagements(item, mall_id, processed_ids)
+        
+        # Process al_nakheel engagements
+        al_nakheel_id = malls_data[0]["unique_property_id"]
+        process_engagements(engagement_data, al_nakheel_id)
+        
+        # Process u_walk engagements (with duplicate checking)
+        u_walk_id = u_walk_mall_data[0]["unique_property_id"]
+        processed_engagement_ids = set()
+        process_engagements(u_walk_engagement_data, u_walk_id, processed_engagement_ids)
         
         db.commit()
         print(f"Engagements inserted successfully. Added {successful_engagements} engagements.")
