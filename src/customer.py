@@ -223,8 +223,8 @@ customer_prompt = PromptTemplate(
       * "F1" → "First Floor"
       * "F2" → "Second Floor"
       * "F3" → "Third Floor"
-    - Example: Instead of "FF08", say "First Floor, Shop #8"
-    - Example: Instead of "GF12", say "Ground Floor, Shop #12"
+    - Example: Instead of "FF08", say "First Floor, Shop 8"
+    - Example: Instead of "GF12", say "Ground Floor, Shop 12"
     - If you see numbers after location codes, treat them as shop numbers
     - For store locations, use "pms_unit_codes" field, NOT "address"
     - For mall addresses, use "address_en" or "address_ar" based on the language
@@ -1245,7 +1245,7 @@ def convert_single_location_code(code):
     if match:
         prefix, number_part = match.groups()
         if prefix in location_map:
-            return f"{location_map[prefix]}, Shop #{number_part}"
+            return f"{location_map[prefix]}, Shop {number_part}"
     
     # If no match found or prefix not in our map, return the original code
     return code
