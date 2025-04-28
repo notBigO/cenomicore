@@ -798,13 +798,15 @@ async def retrieve_family_planning_context(state: CustomerState) -> CustomerStat
             })
     
     # Fetch family-oriented events and offers
+    current_date = datetime.now().isoformat()
     engagements = await db_fetch_all_async(
         """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
            e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, b.brand_name_en
            FROM engagements e 
            LEFT JOIN brands b ON e.brand_id = b.brand_id
-           WHERE e.unique_property_id = $1""",
-        (state.mall_id,)
+           WHERE e.unique_property_id = $1 AND 
+           (e.end_date >= $2 OR e.end_date IS NULL)""",
+        (state.mall_id, current_date)
     )
     
     for engagement in engagements:
@@ -1260,14 +1262,16 @@ async def refine_context(state: CustomerState) -> CustomerState:
     mall = await db_fetch_one_async("SELECT marketing_name AS name_en FROM malls WHERE unique_property_id = $1", (state.mall_id,))
     context["mall_name"] = mall["name_en"] if mall else "Unknown Mall"
 
-    # Fetch all engagements (offers and events) without any date filtering
-    # to show past, current, and future engagements
+    # Fetch all engagements (offers and events) with date filtering
+    # to show only current and future engagements
+    current_date = datetime.now().isoformat()
     engagements = await db_fetch_all_async(
         """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
            e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, e.unique_property_id
            FROM engagements e 
-           WHERE e.unique_property_id = $1""",
-        (state.mall_id,)
+           WHERE e.unique_property_id = $1 AND 
+           (e.end_date >= $2 OR e.end_date IS NULL)""",
+        (state.mall_id, current_date)
     )
     
     for engagement in engagements:
