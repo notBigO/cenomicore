@@ -102,11 +102,21 @@ class ChatTerminal:
                 self.conversation_id = data["conversation_id"]
                 return data["message"]
             else:
-                console.print(f"[red]Error: {response.status_code} - {response.text}[/red]")
-                return "Sorry, I couldn't process your request."
+                # Log the error but don't display technical details to the user
+                console.print(f"[red]Error: {response.status_code}[/red]", style="dim")
+                
+                # Only log the response text, don't show it to the user
+                if hasattr(console, "log"):
+                    console.log(f"API Error response: {response.text}")
+                
+                return "I'm sorry, I'm having trouble understanding that right now. Could you try rephrasing your question?"
         except Exception as e:
-            console.print(f"[red]Error sending message: {str(e)}[/red]")
-            return "Sorry, I encountered an error while processing your message."
+            # Log the error but don't display it to the user
+            console.print(f"[red]Error sending message[/red]", style="dim")
+            if hasattr(console, "log"):
+                console.log(f"Exception: {str(e)}")
+            
+            return "I apologize, but I'm having technical difficulties right now. Please try again later."
     
     async def start_chat(self):
         console.print(Panel.fit(

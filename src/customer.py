@@ -1016,7 +1016,7 @@ async def retrieve_visit_planning_context(state: CustomerState) -> CustomerState
            LEFT JOIN brands b ON e.brand_id = b.brand_id
            WHERE e.unique_property_id = $1 AND 
            e.type = 'offer' AND
-           e.is_exclusive = true AND
+           e.is_exclusive = 1 AND
            (e.end_date >= $2 OR e.end_date IS NULL)
            ORDER BY e.is_exclusive DESC, e.start_date ASC
            LIMIT 5""",

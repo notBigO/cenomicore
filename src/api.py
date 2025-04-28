@@ -392,7 +392,21 @@ async def chat(request: ChatRequest):
         return ChatResponse(**response_data)
     except Exception as e:
         logger.error(f"Error processing chat request: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        
+        # Create a graceful error response without exposing the technical details
+        response_data = {
+            "message": "I'm sorry, I'm having trouble understanding that right now. Could you try rephrasing your question?",
+            "conversation_id": request.conversation_id or str(uuid.uuid4()),
+            "recommendations": None,
+            "is_recommendation_format": False,
+            "follow_up_question": None,
+            "audio_base64": None
+        }
+        
+        # Log detailed error for debugging
+        logger.error(f"CHAT ERROR DETAILS: {str(e)}")
+        
+        return ChatResponse(**response_data)
 
 @app.post("/tenant/update")
 async def tenant_update(request: UpdateRequest):
