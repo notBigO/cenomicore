@@ -9063,5 +9063,71 @@ engagement_data =  [
             "tag_text": "tesla"
          }
       ]
+   },
+   {
+       "engagement_id": 114,
+                "brand_id": 333680,
+                "tenant_profile_id": 938648,
+                "title_en": "Exclusive Deal",
+                "title_ar": "Voga Closet  Exclusive Deal",
+                "type": "offer",
+                "description_en": "<p>VogaCloset  Exclusive Deal Use code CENOMI on check out<br/>CODE: CENOMI</p>",
+                "description_ar": "<p style=\"text-align:right;direction:rtl\">فوغا كلوسيت صفقة حصرية استخدم الكود عند الشراء </p><p style=\"text-align:right;direction:rtl\">CODE: CENOMI</p><p style=\"text-align:right;direction:rtl\"><br/></p>",
+                "terms_conditions_en": "<p>VogaCloset  Exclusive Deal Use code CENOMI on check out<br/>CODE: CENOMI</p>",
+                "terms_conditions_ar": "<p style=\"text-align:right;direction:rtl\">فوغا كلوسيت صفقة حصرية استخدم الكود عند الشراء </p><p style=\"text-align:right;direction:rtl\">CODE: CENOMI</p><p style=\"text-align:right;direction:rtl\"><br/></p><p style=\"text-align:right;direction:rtl\"><br/></p>",
+                "start_date": "2025-04-10T00:00:00+03:00",
+                "end_date": "2025-07-31T00:00:00+03:00",
+                "publish_date": "2025-04-10T00:00:00+03:00",
+                "is_exclusive": 1,
+                "images_en": [
+                    {
+                        "url": "https://cenomi-prod-cdn-huepc5h2frc5c9dj.a02.azurefd.net/prodpublicaccessblob/public-files/724ea678acb0e209232b48a5a2d7406b.jpeg",
+                        "is_primary": True
+                    },
+                    {
+                        "url": "https://cenomi-prod-cdn-huepc5h2frc5c9dj.a02.azurefd.net/prodpublicaccessblob/public-files/5638607bb4234bac7a0d420cf3dfd2c3.jpeg",
+                        "is_primary": False
+                    }
+                ],
+                "images_ar": [
+                    {
+                        "url": "https://cenomi-prod-cdn-huepc5h2frc5c9dj.a02.azurefd.net/prodpublicaccessblob/public-files/07e575966513e3e29220959f5539db0a.jpeg",
+                        "is_primary": True
+                    },
+                    {
+                        "url": "https://cenomi-prod-cdn-huepc5h2frc5c9dj.a02.azurefd.net/prodpublicaccessblob/public-files/76ce88e3caa03ad0d084571c37fff822.jpeg",
+                        "is_primary": False
+                    }
+                ],
+                "tags_en": [
+                    {
+                        "tag_id": "2617",
+                        "tag_text": "spring summer"
+                    },
+                    {
+                        "tag_id": "2836",
+                        "tag_text": "fashion"
+                    },
+                    {
+                        "tag_id": "3134",
+                        "tag_text": "voga closet"
+                    }
+                ],
+                "tags_ar": [
+                    {
+                        "tag_id": "3135",
+                        "tag_text": "الملابس"
+                    },
+                    {
+                        "tag_id": "3136",
+                        "tag_text": "الموضة"
+                    },
+                    {
+                        "tag_id": "3137",
+                        "tag_text": "النساء"
+                    }
+                ],
+                "ext_url": "https://vogacloset.com/saudi/en/women/shopall/?coupon_code=cenomi",
+                "home_banner_disp": 0
    }
 ]

@@ -3250,145 +3250,69 @@ u_walk_engagement_data = [
       ]
    },
    {
-      "engagement_id": 134,
-      "brand_id": 252794,
-      "tenant_profile_id": 1735,
-      "title_en": "Under Armour",
-      "title_ar": "اندر ارمر",
-      "type": "offer",
-      "description_en": "<p>Spend 500 SAR and receive a 150 SAR voucher!</p>",
-      "description_ar": "<p style=\"text-align:right;direction:rtl\">تسوق بقيمة 500 واحصل على قسيمة ب 150 ريال </p>",
-      "terms_conditions_en": "<p>No Terms and Condition</p>",
-      "terms_conditions_ar": "<p style=\"direction:rtl; text-align:inherit\">No Terms and Condition</p>",
-      "start_date": "2025-04-22T00:00:00+03:00",
-      "end_date": "2025-04-30T00:00:00+03:00",
-      "publish_date": "2025-04-22T00:00:00+03:00",
-      "is_exclusive": 0,
-      "ext_url": "",
-      "images_en": [
-         {
-            "url": "https://cenomi-prod-cdn-huepc5h2frc5c9dj.a02.azurefd.net/prodpublicaccessblob/public-files/2f22d3f44d4dcbfbbfe594379303d1da.jpeg",
-            "is_primary": True
-         },
-         {
-            "url": "https://cenomi-prod-cdn-huepc5h2frc5c9dj.a02.azurefd.net/prodpublicaccessblob/public-files/1e15dc1607560ff162c40f2b31005332.jpeg",
-            "is_primary": False
-         }
-      ],
-      "images_ar": [
-         {
-            "url": "https://cenomi-prod-cdn-huepc5h2frc5c9dj.a02.azurefd.net/prodpublicaccessblob/public-files/8f18bd6f17484f1377f60612d8dfa4fa.jpeg",
-            "is_primary": True
-         },
-         {
-            "url": "https://cenomi-prod-cdn-huepc5h2frc5c9dj.a02.azurefd.net/prodpublicaccessblob/public-files/e10126dbc048468faa0d6ce896299c7c.jpeg",
-            "is_primary": False
-         }
-      ],
-      "tags_en": [
-         {
-            "tag_id": "3296",
-            "tag_text": "shoes"
-         },
-         {
-            "tag_id": "3445",
-            "tag_text": "sport"
-         },
-         {
-            "tag_id": "3619",
-            "tag_text": "Under Armour"
-         }
-      ],
-      "tags_ar": [
-         {
-            "tag_id": "3446",
-            "tag_text": "اندر ارمور"
-         },
-         {
-            "tag_id": "3447",
-            "tag_text": "رياضة"
-         },
-         {
-            "tag_id": "3586",
-            "tag_text": "جزمة"
-         }
-      ]
-   },
-   {
-      "engagement_id": 136,
-      "brand_id": 252780,
-      "tenant_profile_id": 1737,
-      "title_en": "Nike ",
-      "title_ar": "نايك",
-      "type": "offer",
-      "description_en": "<p>Shop for 1,000 SAR and get a voucher worth 300 SAR.<br/>Shop for 500 SAR and get a voucher worth 150 SAR.</p>",
-      "description_ar": "<p style=\"text-align:right;direction:rtl\">تسوق بقيمة 1000 ريال واحصل على قسيمة بقيمة 300 ريال </p><p style=\"text-align:right;direction:rtl\">تسوق بقيمة 500 ريال واحصل على قسيمة بقيمة 150 ريال</p>",
-      "terms_conditions_en": "<p>No Terms and Condition</p>",
-      "terms_conditions_ar": "<p style=\"direction:rtl; text-align:inherit\"><span style=\"color:#20113e\">No Terms and Condition</span></p>",
-      "start_date": "2025-04-22T00:00:00+03:00",
-      "end_date": "2025-04-30T00:00:00+03:00",
-      "publish_date": "2025-04-22T00:00:00+03:00",
-      "is_exclusive": 0,
-      "ext_url": "",
-      "images_en": [
-         {
-            "url": "https://cenomi-prod-cdn-huepc5h2frc5c9dj.a02.azurefd.net/prodpublicaccessblob/public-files/1a324a11cb0eff9e9504b21eef718ba0.jpeg",
-            "is_primary": True
-         },
-         {
-            "url": "https://cenomi-prod-cdn-huepc5h2frc5c9dj.a02.azurefd.net/prodpublicaccessblob/public-files/b042cd43bbd17d5b7430a376cf32668b.jpeg",
-            "is_primary": False
-         },
-         {
-            "url": "https://cenomi-prod-cdn-huepc5h2frc5c9dj.a02.azurefd.net/prodpublicaccessblob/public-files/507a2337379b71e27b0caa94eb280156.jpeg",
-            "is_primary": False
-         }
-      ],
-      "images_ar": [
-         {
-            "url": "https://cenomi-prod-cdn-huepc5h2frc5c9dj.a02.azurefd.net/prodpublicaccessblob/public-files/a493bb41c0f274f32ff7b11e5996df86.jpeg",
-            "is_primary": True
-         },
-         {
-            "url": "https://cenomi-prod-cdn-huepc5h2frc5c9dj.a02.azurefd.net/prodpublicaccessblob/public-files/f6361bea1cebc44f127a3be144b68e4d.jpeg",
-            "is_primary": False
-         },
-         {
-            "url": "https://cenomi-prod-cdn-huepc5h2frc5c9dj.a02.azurefd.net/prodpublicaccessblob/public-files/2e67173e79b6fa8268dafc379031f5c3.jpeg",
-            "is_primary": False
-         }
-      ],
-      "tags_en": [
-         {
-            "tag_id": "3127",
-            "tag_text": "NIKE"
-         },
-         {
-            "tag_id": "3296",
-            "tag_text": "shoes"
-         },
-         {
-            "tag_id": "3445",
-            "tag_text": "sport"
-         }
-      ],
-      "tags_ar": [
-         {
-            "tag_id": "3447",
-            "tag_text": "رياضة"
-         },
-         {
-            "tag_id": "3586",
-            "tag_text": "جزمة"
-         },
-         {
-            "tag_id": "3613",
-            "tag_text": "حذاء"
-         },
-         {
-            "tag_id": "3617",
-            "tag_text": "نايك"
-         }
-      ]
-   }
+                "engagement_id": 114,
+                "brand_id": 333680,
+                "tenant_profile_id": 938648,
+                "title_en": "Exclusive Deal",
+                "title_ar": "Voga Closet  Exclusive Deal",
+                "type": "offer",
+                "description_en": "<p>VogaCloset  Exclusive Deal Use code CENOMI on check out<br/>CODE: CENOMI</p>",
+                "description_ar": "<p style=\"text-align:right;direction:rtl\">فوغا كلوسيت صفقة حصرية استخدم الكود عند الشراء </p><p style=\"text-align:right;direction:rtl\">CODE: CENOMI</p><p style=\"text-align:right;direction:rtl\"><br/></p>",
+                "terms_conditions_en": "<p>VogaCloset  Exclusive Deal Use code CENOMI on check out<br/>CODE: CENOMI</p>",
+                "terms_conditions_ar": "<p style=\"text-align:right;direction:rtl\">فوغا كلوسيت صفقة حصرية استخدم الكود عند الشراء </p><p style=\"text-align:right;direction:rtl\">CODE: CENOMI</p><p style=\"text-align:right;direction:rtl\"><br/></p><p style=\"text-align:right;direction:rtl\"><br/></p>",
+                "start_date": "2025-04-10T00:00:00+03:00",
+                "end_date": "2025-07-31T00:00:00+03:00",
+                "publish_date": "2025-04-10T00:00:00+03:00",
+                "is_exclusive": 1,
+                "images_en": [
+                    {
+                        "url": "https://cenomi-prod-cdn-huepc5h2frc5c9dj.a02.azurefd.net/prodpublicaccessblob/public-files/724ea678acb0e209232b48a5a2d7406b.jpeg",
+                        "is_primary": True
+                    },
+                    {
+                        "url": "https://cenomi-prod-cdn-huepc5h2frc5c9dj.a02.azurefd.net/prodpublicaccessblob/public-files/5638607bb4234bac7a0d420cf3dfd2c3.jpeg",
+                        "is_primary": False
+                    }
+                ],
+                "images_ar": [
+                    {
+                        "url": "https://cenomi-prod-cdn-huepc5h2frc5c9dj.a02.azurefd.net/prodpublicaccessblob/public-files/07e575966513e3e29220959f5539db0a.jpeg",
+                        "is_primary": True
+                    },
+                    {
+                        "url": "https://cenomi-prod-cdn-huepc5h2frc5c9dj.a02.azurefd.net/prodpublicaccessblob/public-files/76ce88e3caa03ad0d084571c37fff822.jpeg",
+                        "is_primary": False
+                    }
+                ],
+                "tags_en": [
+                    {
+                        "tag_id": "2617",
+                        "tag_text": "spring summer"
+                    },
+                    {
+                        "tag_id": "2836",
+                        "tag_text": "fashion"
+                    },
+                    {
+                        "tag_id": "3134",
+                        "tag_text": "voga closet"
+                    }
+                ],
+                "tags_ar": [
+                    {
+                        "tag_id": "3135",
+                        "tag_text": "الملابس"
+                    },
+                    {
+                        "tag_id": "3136",
+                        "tag_text": "الموضة"
+                    },
+                    {
+                        "tag_id": "3137",
+                        "tag_text": "النساء"
+                    }
+                ],
+                "ext_url": "https://vogacloset.com/saudi/en/women/shopall/?coupon_code=cenomi",
+                "home_banner_disp": 0
+            }
 ]
