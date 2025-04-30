@@ -9,7 +9,7 @@ import json
 import os
 from pinecone import Pinecone
 from langchain_huggingface import HuggingFaceEmbeddings
-from utils import db_fetch_one_async, db_fetch_all_async, db_execute_async, REDIS_CLIENT, logger, get_conversation_history
+from src.utils import db_fetch_one_async, db_fetch_all_async, db_execute_async, REDIS_CLIENT, logger, get_conversation_history
 
 # Pinecone setup
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")

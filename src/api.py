@@ -6,7 +6,7 @@ import json
 from fastapi.responses import StreamingResponse
 import base64
 import requests
-from utils import (
+from src.utils import (
     detect_language, get_or_create_conversation, db_fetch_all_async, 
     get_conversation_history, add_message_to_conversation, db_fetch_one_async, 
     db_execute_async, DateTimeEncoder, logger, get_db_pool, REDIS_CLIENT,
@@ -14,13 +14,13 @@ from utils import (
     SHORT_CACHE_TTL, MEDIUM_CACHE_TTL, LONG_CACHE_TTL, EXTENDED_CACHE_TTL,
     get_memory_cache, set_memory_cache, strip_markdown
 )
-from customer import CustomerState, customer_graph
-from tenant import TenantState, tenant_graph
+from src.customer import CustomerState, customer_graph
+from src.tenant import TenantState, tenant_graph
 from typing import Optional, List, Dict, Any
 from langsmith import Client
 from langsmith import trace
 import os
-from customer import populate_knowledge_graph
+from src.customer import populate_knowledge_graph
 import uuid
 from io import BytesIO
 import functools

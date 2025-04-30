@@ -37,23 +37,33 @@ redis_host = os.getenv('REDIS_HOST', 'localhost')
 redis_port = int(os.getenv('REDIS_PORT', '6379'))
 redis_url = os.getenv('RENDER_REDIS_INTERNAL_URI', None)
 
-# Parse Redis URL if it exists (Render provides this)
+# Initialize Redis connection pool
 if redis_url:
     try:
+        REDIS_POOL = redis.ConnectionPool.from_url(
+            redis_url,
+            decode_responses=True,
+            max_connections=10
+        )
         parsed_url = urlparse(redis_url)
-        redis_host = parsed_url.hostname or redis_host
-        redis_port = parsed_url.port or redis_port
-        logger.info(f"Using Redis from RENDER_REDIS_INTERNAL_URI: {redis_host}:{redis_port}")
+        logger.info(f"Using Redis from RENDER_REDIS_INTERNAL_URI: {parsed_url.hostname}:{parsed_url.port}")
     except Exception as e:
         logger.warning(f"Failed to parse Redis URL: {e}, falling back to environment variables")
-
-REDIS_POOL = redis.ConnectionPool(
-    host=redis_host, 
-    port=redis_port, 
-    db=0, 
-    decode_responses=True, 
-    max_connections=10
-)
+        REDIS_POOL = redis.ConnectionPool(
+            host=redis_host,
+            port=redis_port,
+            db=0,
+            decode_responses=True,
+            max_connections=10
+        )
+else:
+    REDIS_POOL = redis.ConnectionPool(
+        host=redis_host,
+        port=redis_port,
+        db=0,
+        decode_responses=True,
+        max_connections=10
+    )
 
 def get_redis_client():
     return redis.Redis(connection_pool=REDIS_POOL)
@@ -206,7 +216,6 @@ def convert_to_json_safe(data):
         return str(data)
     else:
         return data
-
 
 def detect_language(text: str) -> str:
     try:
