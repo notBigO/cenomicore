@@ -1,12 +1,10 @@
 #!/bin/bash
 set -e
 
-# Set environment variables for Redis connection
-export REDIS_HOST=$(echo $RENDER_REDIS_INTERNAL_URI | cut -d':' -f1)
-export REDIS_PORT=$(echo $RENDER_REDIS_INTERNAL_URI | cut -d':' -f2)
+# No need to set Redis environment variables as they will be provided directly
 
-# Wait for PostgreSQL database to be ready
-echo "Waiting for PostgreSQL..."
+# Wait for database connections to be ready
+echo "Waiting for external database connections..."
 sleep 5
 
 # Run your application
