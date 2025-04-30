@@ -356,13 +356,6 @@ async def chat(request: ChatRequest):
             # Log response text
             logger.info(f"Response text: {result['response'][:50]}...")
             
-            # If TTS is requested, start generating it with the appropriate speed
-            if request.include_tts and result["response"]:
-                tts_speed = 0.7 if language == "ar" else None
-                tts_task = generate_speech(result["response"], language, speed=tts_speed)
-            else:
-                tts_task = None
-
         # Extract image URLs from markdown in the response
         def extract_images_from_markdown(text):
             # Match markdown image pattern: ![alt text](url)
@@ -379,6 +372,14 @@ async def chat(request: ChatRequest):
         for img in images:
             # Remove the markdown image from the clean response
             clean_response = clean_response.replace(f"![{img['alt_text']}]({img['url']})", "").strip()
+            
+        # If TTS is requested, start generating it with the appropriate speed
+        # Use clean_response without image markdown for TTS
+        if request.include_tts and result["response"]:
+            tts_speed = 0.7 if language == "ar" else None
+            tts_task = generate_speech(clean_response, language, speed=tts_speed)
+        else:
+            tts_task = None
 
         # Prepare the response for caching
         response_data = {

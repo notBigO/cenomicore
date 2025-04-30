@@ -341,4 +341,6 @@ def strip_markdown(text: str) -> str:
     text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
     # Replace italic text (*text*) with just the text
     text = re.sub(r'\*(.*?)\*', r'\1', text)
+    # Remove image markdown
+    text = re.sub(r'!\[(.*?)\]\((.*?)\)', '', text)
     return text
