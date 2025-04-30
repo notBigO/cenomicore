@@ -2,7 +2,6 @@ from typing import Optional, List, Dict, Any, Union
 from pydantic import BaseModel as PydanticBaseModel, Field
 from pydantic.json import pydantic_encoder
 from langchain_core.prompts import PromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import StateGraph, END
 from datetime import datetime

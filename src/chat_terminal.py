@@ -1,16 +1,13 @@
 import asyncio
-import json
 import os
 import sys
 import argparse
 from getpass import getpass
 import requests
-from typing import Optional, List, Dict, Any
 from rich.console import Console
 from rich.prompt import Prompt
 from rich.panel import Panel
 from rich.markdown import Markdown
-from rich import print
 
 # Terminal colors and styling
 console = Console()
