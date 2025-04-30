@@ -1,0 +1,45 @@
+# Exclude documentation and seed data folders
+seed/
+docs/
+
+# Version control
+.git
+.gitignore
+
+# Environment files
+.env
+.env.*
+*.env
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Docker files (optional - include these if you want to keep Dockerfile in image)
+# Dockerfile
+# docker-compose*.yml
+
+# Development files
+*.log
+*.sqlite
+.coverage
+htmlcov/ 

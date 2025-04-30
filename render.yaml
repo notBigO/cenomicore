@@ -1,0 +1,57 @@
+services:
+  # Web service for FastAPI
+  - type: web
+    name: cenomi-chatbot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn src.api:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: DB_NAME
+        value: cenomi_db
+      - key: DB_USER
+        value: postgres
+      - key: DB_HOST
+        fromService:
+          type: pserv
+          name: cenomi-postgres
+          property: host
+      - key: DB_PORT
+        value: 5432
+      - key: DB_PASSWORD
+        fromService:
+          type: pserv
+          name: cenomi-postgres
+          property: password
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: LANGSMITH_API_KEY
+        sync: false
+      - key: LANGCHAIN_PROJECT
+        value: cenomi-bot
+
+  # PostgreSQL Database
+  - type: pserv
+    name: cenomi-postgres
+    plan: free
+    ipAllowList: [] # only allow internal connections
+    envVars:
+      - key: POSTGRES_DB
+        value: cenomi_db
+      - key: POSTGRES_USER
+        value: postgres
+
+  # Redis Instance
+  - type: redis
+    name: cenomi-redis
+    plan: free
+    ipAllowList: [] # only allow internal connections
+    maxmemoryPolicy: noeviction

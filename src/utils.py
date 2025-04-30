@@ -14,6 +14,7 @@ from asyncpg.pool import Pool
 import uuid
 import functools
 import re
+from urllib.parse import urlparse
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -32,7 +33,28 @@ DB_CONFIG_ASYNC = {
 }
 
 # Redis setup with connection pooling
-REDIS_POOL = redis.ConnectionPool(host='localhost', port=6379, db=0, decode_responses=True, max_connections=10)
+redis_host = os.getenv('REDIS_HOST', 'localhost')
+redis_port = int(os.getenv('REDIS_PORT', '6379'))
+redis_url = os.getenv('RENDER_REDIS_INTERNAL_URI', None)
+
+# Parse Redis URL if it exists (Render provides this)
+if redis_url:
+    try:
+        parsed_url = urlparse(redis_url)
+        redis_host = parsed_url.hostname or redis_host
+        redis_port = parsed_url.port or redis_port
+        logger.info(f"Using Redis from RENDER_REDIS_INTERNAL_URI: {redis_host}:{redis_port}")
+    except Exception as e:
+        logger.warning(f"Failed to parse Redis URL: {e}, falling back to environment variables")
+
+REDIS_POOL = redis.ConnectionPool(
+    host=redis_host, 
+    port=redis_port, 
+    db=0, 
+    decode_responses=True, 
+    max_connections=10
+)
+
 def get_redis_client():
     return redis.Redis(connection_pool=REDIS_POOL)
 
