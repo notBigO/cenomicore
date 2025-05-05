@@ -1,5 +1,5 @@
 from typing import Optional, List, Dict, Any, Union
-from pydantic import BaseModel as PydanticBaseModel, Field
+from pydantic import BaseModel as PydanticBaseModel, Field, SecretStr
 from pydantic.json import pydantic_encoder
 from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -42,7 +42,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY environment variable is not set")
 
-llm = ChatOpenAI(model="gpt-4o-mini", api_key=OPENAI_API_KEY)
+# Create SecretStr for OpenAI API key
+openai_api_key = SecretStr(OPENAI_API_KEY)
+llm = ChatOpenAI(model="gpt-4o-mini", api_key=openai_api_key)
 
 # Knowledge graph for relationships
 knowledge_graph = nx.Graph()
@@ -174,7 +176,8 @@ def add_products_to_graph(products):
     
 
 def add_engagements_to_graph(engagements):
-    """Add engagements (offers and events) to the knowledge graph"""
+    """Add engagement data to the knowledge graph."""
+    # Add all engagements to knowledge graph
     for engagement in engagements:
         engagement_type = engagement.get("type", "").lower()
         node_data = {
@@ -277,6 +280,13 @@ customer_prompt = PromptTemplate(
     template="""
     You are CenomiAI — a mall assistant at {mall_name}, designed to help shoppers find information, plan visits, and discover stores, offers, and events.
 
+    # CRITICAL INSTRUCTION
+    - ONLY provide information that is explicitly present in the database information below
+    - NEVER invent, hallucinate, or make up ANY information not included in the provided context
+    - If you don't know something or it's not in the data, say "I don't have that information" or similar
+    - Do NOT reference stores, products, offers, events, or amenities that don't explicitly appear in the context data
+    - Consider the context data as your ONLY source of truth
+
     # Response Style
     - Be concise, friendly and conversational, as if you're a helpful friend who knows the mall well
     - Keep responses very short - typically 1-3 sentences maximum
@@ -340,12 +350,12 @@ customer_prompt = PromptTemplate(
     - Keep all responses brief and to-the-point regardless of turn count
     - For turn 2+, end with a brief closing statement like "Enjoy your visit!" or "Hope that helps!"
 
-    # Mall Database Information
+    # Mall Database Information (YOUR ONLY SOURCE OF TRUTH)
     {context}
 
     User Query: {query}
     
-    Respond in {lang} in a friendly, conversational tone. Your response should be structured to work well for both text and voice:
+    Respond in {lang} in a friendly, conversational tone, using ONLY information from the Mall Database Information above. Your response should be structured to work well for both text and voice:
     
     1. Direct answer with only the most important details (1-3 bullets if listing items)
     2. Include relevant images using markdown format when available (![Description](image_url))
@@ -397,37 +407,51 @@ class CustomerState(PydanticBaseModel):
     conversation_topic: Optional[str] = None  # Track current conversation topic
     topic_turn_count: int = 0  # Track number of turns on current topic
     response_format: Optional[Union[ResponseFormat, Dict[str, Any]]] = None  # Store formatted response as object or dict
+    mall_data: Optional[Dict[str, Any]] = None  # Store mall data
+    _combined_classification_result: Optional[Dict[str, Any]] = None  # Store combined classification result
+
+    class Config:
+        arbitrary_types_allowed = True
+        underscore_attrs_are_private = False  # Allow access to _attributes
 
 # Add the new node for high-level query classification
 async def classify_query_type(state: CustomerState) -> CustomerState:
     combined_result = await optimized_classification(state)
-    state.query_type = combined_result["query_type"]
-    logger.info(f"Classified query type: {state.query_type}")
+    if combined_result:
+        state.query_type = combined_result.get("query_type")
+        logger.info(f"Classified query type: {state.query_type}")
+    else:
+        logger.warning("Could not classify query type")
+        state.query_type = "general_query"  # Default fallback
     return state
 
 # Update existing classify_intent function to use the high-level query type for context
 async def classify_intent(state: CustomerState) -> CustomerState:
     # Reuse the same result from combined classification if already performed
-    if hasattr(state, "_combined_classification_result"):
+    if hasattr(state, "_combined_classification_result") and state._combined_classification_result:
         combined_result = state._combined_classification_result
     else:
         combined_result = await optimized_classification(state)
         state._combined_classification_result = combined_result
     
-    state.intent = combined_result["intent"]
+    # Ensure we have a valid intent, defaulting to fallback if none
+    state.intent = combined_result.get("intent") if combined_result else "other_general"
     state.context_data = state.context_data or {}
     
     # Set resolved entity if present
-    if combined_result["resolved_entity"]:
+    if combined_result and combined_result.get("resolved_entity"):
         state.context_data["resolved_entity"] = combined_result["resolved_entity"]
     
     # Set type preference if present
-    state.type_preference = combined_result["type_preference"]
+    if combined_result and combined_result.get("type_preference"):
+        state.type_preference = combined_result["type_preference"]
     
     # Determine if we need a type follow-up
-    state.needs_type_follow_up = combined_result["needs_type_follow_up"]
+    if combined_result:
+        state.needs_type_follow_up = combined_result.get("needs_type_follow_up", False)
     
-    if state.intent.startswith("other_"):
+    # Only check startswith if state.intent is not None
+    if state.intent and state.intent.startswith("other_"):
         state.response = "I'm not sure what you mean 😅. Could you tell me more?"
     
     logger.info(f"Classified intent: {state.intent}, Resolved entity: {state.context_data.get('resolved_entity')}, Type preference: {state.type_preference}")
@@ -631,8 +655,14 @@ async def retrieve_offer_event_context(state: CustomerState) -> CustomerState:
     cache_key = f"offer_event_context:{state.query}:{state.mall_id}"
     cached_context = REDIS_CLIENT.get(cache_key)
     if cached_context:
-        state.initial_context = json.loads(cached_context)
-        return state
+        try:
+            if isinstance(cached_context, bytes):
+                cached_context = cached_context.decode('utf-8')
+            state.initial_context = json.loads(cached_context)
+            return state
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error(f"Error decoding cached offer/event context: {e}")
+            # Continue with retrieving fresh data
     
     # Get current date for filtering current/future events
     current_date = datetime.now().isoformat()
@@ -673,10 +703,11 @@ async def retrieve_offer_event_context(state: CustomerState) -> CustomerState:
     
     # If looking for a specific brand's offers, prioritize those
     if state.context_data and state.context_data.get("resolved_entity"):
-        brand_name = state.context_data.get("resolved_entity").lower()
-        for item in state.initial_context:
-            if item["metadata"].get("brand_name", "").lower() == brand_name:
-                item["score"] = 1.5  # Boost score for matching brand
+        brand_name = state.context_data.get("resolved_entity", "").lower()
+        if brand_name:  # Ensure it's not None or empty
+            for item in state.initial_context:
+                if item["metadata"].get("brand_name", "").lower() == brand_name:
+                    item["score"] = 1.5  # Boost score for matching brand
     
     # Sort by score descending
     state.initial_context.sort(key=lambda x: x["score"], reverse=True)
@@ -687,7 +718,12 @@ async def retrieve_offer_event_context(state: CustomerState) -> CustomerState:
             if "location" in item["metadata"]:
                 item["metadata"]["location"] = convert_location_codes(item["metadata"]["location"])
     
-    REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
+    # Cache the results
+    try:
+        REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
+    except Exception as e:
+        logger.error(f"Error caching offer/event context: {e}")
+    
     return state
 
 async def retrieve_services_context(state: CustomerState) -> CustomerState:
@@ -1306,546 +1342,158 @@ def convert_single_location_code(code):
 
 # Modify the beginning of the refine_context function to process location codes
 async def refine_context(state: CustomerState) -> CustomerState:
+    """
+    Refine the context based on the intent and query type.
+    This function ensures we're only using data from the database or vector store.
+    """
     if not state.mall_id:
         state.response = "Please select a mall first."
         return state
 
-    context = {
-        "stores": [],
-        "offers": [],
-        "events": [],
-        "products": [],
-        "services": [],
-        "amenities": [],
-        "mall_name": "",
-        "neighboring_stores": [],  # Field for neighboring stores
-        "category_types": {        # New field for organizing available category types
-            "food": set(),         # Food/restaurant types (Italian, Fast Food, etc.)
-            "product": set(),      # Product types (Sports, Casual, Electronics, etc.)
-            "store": set()         # Store categories (Fashion, Electronics, etc.)
-        }
-    }
-    
-    # Get mall name
-    mall = await db_fetch_one_async("SELECT marketing_name AS name_en FROM malls WHERE unique_property_id = $1", (state.mall_id,))
-    context["mall_name"] = mall["name_en"] if mall else "Unknown Mall"
-
-    # Fetch all engagements (offers and events) with date filtering
-    # to show only current and future engagements
-    current_date = datetime.now().isoformat()
-    engagements = await db_fetch_all_async(
-        """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
-           e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, e.unique_property_id,
-           e.images_en, e.images_ar
-           FROM engagements e 
-           WHERE e.unique_property_id = $1 AND 
-           (e.end_date >= $2 OR e.end_date IS NULL)""",
-        (state.mall_id, current_date)
-    )
-    
-    for engagement in engagements:
-        # Get associated brand information
-        brand = None
-        if engagement.get("brand_id"):
-            brand = await db_fetch_one_async(
-                "SELECT brand_name_en, category_name FROM brands WHERE brand_id = $1",
-                (engagement["brand_id"],)
-            )
-        
-        engagement_type = engagement.get("type", "").lower()
-        
-        # Extract image URLs
-        image_url = None
-        if state.language == "ar" and engagement.get("images_ar"):
-            # Try to get Arabic image if language is Arabic
-            if isinstance(engagement["images_ar"], str):
-                image_url = engagement["images_ar"]
-            elif isinstance(engagement["images_ar"], list) and len(engagement["images_ar"]) > 0:
-                image_url = engagement["images_ar"][0]  # Take the first image if multiple exist
-        elif engagement.get("images_en"):
-            # Use English image as fallback
-            if isinstance(engagement["images_en"], str):
-                image_url = engagement["images_en"]
-            elif isinstance(engagement["images_en"], list) and len(engagement["images_en"]) > 0:
-                image_url = engagement["images_en"][0]  # Take the first image if multiple exist
-        
-        if engagement_type == "offer":
-            offer_data = {
-                "id": engagement["engagement_id"],
-                "title": engagement.get("title_en", ""),
-                "description": engagement.get("description_en", ""),
-                "brand_id": engagement.get("brand_id"),
-                "store_name": brand["brand_name_en"] if brand else "Unknown Store",
-                "category": brand.get("category_name", "") if brand else "",
-                "start_date": engagement.get("start_date", ""),
-                "end_date": engagement.get("end_date", ""),
-                "terms": engagement.get("terms_conditions_en", ""),
-                "is_exclusive": bool(engagement.get("is_exclusive", 0)),
-                "image_url": image_url
-            }
-            context["offers"].append(offer_data)
-        
-        elif engagement_type == "events":
-            event_data = {
-                "id": engagement["engagement_id"],
-                "name": engagement.get("title_en", ""),
-                "description": engagement.get("description_en", ""),
-                "brand_id": engagement.get("brand_id"),
-                "store_name": brand["brand_name_en"] if brand else None,
-                "start_date": engagement.get("start_date", ""),
-                "end_date": engagement.get("end_date", ""),
-                "terms": engagement.get("terms_conditions_en", ""),
-                "image_url": image_url
-            }
-            context["events"].append(event_data)
-
-    # For store queries, make sure to fetch ALL stores for a given mall
-    store_name = state.context_data.get("resolved_entity", "").lower() if state.context_data else ""
-    target_store_data = None
-    
-    # Always fetch all stores for complete data
-    all_stores = await db_fetch_all_async(
-        """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
-           b.store_phone_number, b.store_email, b.store_website, b.pms_unit_codes,
-           b.brand_logo, b.banner_en, b.banner_ar
-           FROM brands b 
-           JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
-           WHERE bma.unique_property_id = $1""", 
-        (state.mall_id,)
-    )
-    
-    food_related_categories = ['restaurant', 'cafe', 'food', 'dining', 'bakery', 'coffee']
-    
-    for store in all_stores:
-        # Extract image URLs
-        image_url = None
-        # First try brand logo as it's usually the most relevant
-        if store.get("brand_logo"):
-            image_url = store["brand_logo"]
-        # Then try banner based on language
-        elif state.language == "ar" and store.get("banner_ar"):
-            image_url = store["banner_ar"]
-        elif store.get("banner_en"):
-            image_url = store["banner_en"]
-            
-        store_data = {
-            "name": store["brand_name_en"],
-            "category": store.get("category_name", ""),
-            "store_id": store["brand_id"],
-            "description": store.get("description_en", ""),
-            "phone": store.get("store_phone_number", ""),
-            "email": store.get("store_email", ""),
-            "website": store.get("store_website", ""),
-            "location": store.get("pms_unit_codes", {}),
-            "image_url": image_url
-        }
-        
-        # Add to category lists
-        category = store.get("category_name", "").lower()
-        if category:
-            # Extract food types from description if it's a food place
-            is_food_place = any(food_term in category for food_term in food_related_categories)
-            
-            if is_food_place:
-                # Add to food categories
-                context["category_types"]["food"].add(category)
-                
-                # Try to extract specific cuisine types from description
-                description = store.get("description_en", "").lower()
-                cuisine_types = ["italian", "indian", "chinese", "japanese", "american", "mexican", 
-                                "thai", "fast food", "mediterranean", "middle eastern", "french"]
-                for cuisine in cuisine_types:
-                    if cuisine in description:
-                        context["category_types"]["food"].add(cuisine)
-            else:
-                # Add to store categories
-                context["category_types"]["store"].add(category)
-        
-        # If this is the store being searched for, put it at the top and remember it for finding neighbors
-        if store_name and store_name in store["brand_name_en"].lower():
-            context["stores"].insert(0, store_data)
-            target_store_data = store_data
+    # Check if we have any initial context
+    if not state.initial_context or len(state.initial_context) == 0:
+        logger.warning("No initial context found for refining")
+        if state.language == "ar":
+            state.response = "عذراً، لا يمكنني العثور على معلومات ذات صلة. هل يمكنك إعادة صياغة سؤالك؟"
         else:
-            context["stores"].append(store_data)
-    
-    # Find neighboring stores if a specific store was searched for
-    if target_store_data and target_store_data.get("location"):
-        # Extract location codes for the target store
-        location_codes = target_store_data["location"]
-        neighboring_stores = []
-        
-        # Function to parse location code and find neighbors
-        def get_location_prefix_and_number(code):
-            import re
-            if not isinstance(code, str):
-                return None, None
-                
-            match = re.match(r'([A-Za-z]+)(\d+.*)', code)
-            if match:
-                prefix, number_part = match.groups()
-                try:
-                    number_match = re.match(r'(\d+)', number_part)
-                    if number_match:
-                        number = int(number_match.group(1))
-                        return prefix, number
-                except (ValueError, AttributeError):
-                    pass
-            return None, None
-        
-        # Find stores with adjacent location codes
-        for location_code in location_codes:
-            prefix, number = get_location_prefix_and_number(location_code)
-            if prefix and number is not None:
-                # Check for adjacent numbers (±1, ±2)
-                adjacent_codes = [
-                    f"{prefix}{number-2}", f"{prefix}{number-1}", 
-                    f"{prefix}{number+1}", f"{prefix}{number+2}"
-                ]
-                
-                for store in context["stores"]:
-                    if store == target_store_data:
-                        continue
-                    
-                    store_locations = store.get("location", [])
-                    if any(code in adjacent_codes for code in store_locations):
-                        if store not in neighboring_stores:
-                            neighboring_stores.append(store)
-        
-        # Add neighboring stores to context
-        context["neighboring_stores"] = neighboring_stores[:5]  # Limit to 5 neighbors
-    
-    # Fetch service information using the correct column names from DB schema
-    services = await db_fetch_all_async(
-        """SELECT s.id AS service_id, s.name, s.description, s.description_ar, s.location, s.is_available, s.icon_url
-           FROM services s
-           WHERE s.unique_property_id = $1""",
-        (state.mall_id,)
-    )
-    
-    for service in services:
-        service_data = {
-            "name": service.get("name", ""),
-            "description": service.get("description", ""),
-            "description_ar": service.get("description_ar", ""),
-            "location": service.get("location", ""),
-            "is_available": service.get("is_available", True),
-            "image_url": service.get("icon_url")
-        }
-        context["services"].append(service_data)
-    
-    # Fetch product details including price
-    if state.intent and state.intent.startswith("product_"):
-        product_name = state.context_data.get("resolved_entity", "").lower() if state.context_data else ""
-        
-        # Search for products either by name or for a specific store
-        if product_name:
-            products = await db_fetch_all_async(
-                """SELECT p.id, p.name, p.description, p.price, p.category, p.brand_id, 
-                   p.is_featured, p.in_stock, b.brand_name_en, b.brand_logo
-                   FROM products p
-                   JOIN brands b ON p.brand_id = b.brand_id
-                   JOIN brand_mall_association bma ON b.brand_id = bma.brand_id
-                   WHERE bma.unique_property_id = $1 AND 
-                   (LOWER(p.name) LIKE $2 OR LOWER(b.brand_name_en) LIKE $2)""",
-                (state.mall_id, f"%{product_name}%")
-            )
-        else:
-            products = await db_fetch_all_async(
-                """SELECT p.id, p.name, p.description, p.price, p.category, p.brand_id, 
-                   p.is_featured, p.in_stock, b.brand_name_en, b.brand_logo
-                   FROM products p
-                   JOIN brands b ON p.brand_id = b.brand_id
-                   JOIN brand_mall_association bma ON b.brand_id = bma.brand_id
-                   WHERE bma.unique_property_id = $1 
-                   LIMIT 20""",
-                (state.mall_id,)
-            )
-        
-        for product in products:
-            product_category = product.get("category", "").lower()
-            if product_category:
-                context["category_types"]["product"].add(product_category)
-                
-            context["products"].append({
-                "id": product["id"],
-                "name": product["name"],
-                "description": product.get("description", ""),
-                "price": float(product["price"]) if product.get("price") is not None else None,
-                "brand_id": product["brand_id"],
-                "category": product_category,
-                "store_name": product.get("brand_name_en", ""),
-                "in_stock": product.get("in_stock", True),
-                "image_url": product.get("brand_logo")  # Use brand logo for product image
-            })
+            state.response = "Sorry, I couldn't find any relevant information. Could you rephrase your question?"
+        return state
 
-    # Process Pinecone results for other entities that might be relevant
-    brand_ids = set()
-    for doc in state.initial_context or []:
-        metadata = doc["metadata"]
-        if metadata.get("mall_id") != state.mall_id:
+    # Sort initial context by score for better retrieval (higher scores first)
+    state.initial_context = sorted(state.initial_context, key=lambda x: x.get("score", 0), reverse=True)
+    
+    # Limit to top 10 results for performance 
+    top_results = state.initial_context[:10]
+
+    # Create a detailed context from the database results
+    details = []
+    for item in top_results:
+        # Skip if no metadata (shouldn't happen with proper retrieval)
+        if not item.get("metadata"):
             continue
-        
-        doc_type = metadata.get("type")
-        if doc_type == "store" and not (state.intent and state.intent.startswith("store_")):
-            # Only add store from vector search if not already doing a direct store query
-            store_category = metadata.get("category_en", "").lower()
-            if store_category:
-                context["category_types"]["store"].add(store_category)
-                
-            store = {
-                "name": metadata.get("name_en"),
-                "category": store_category,
-                "store_id": metadata.get("brand_id"),
-                "description": metadata.get("description_en"),
-                "image_url": metadata.get("brand_logo") or metadata.get("banner_en")
-            }
-            if not any(s.get("name") == store["name"] for s in context["stores"]):
-                context["stores"].append(store)
-            if metadata.get("brand_id"):
-                brand_ids.add(metadata.get("brand_id"))
-                
-        elif doc_type == "product" and not (state.intent and state.intent.startswith("product_")):
-            # Only add product from vector search if not already doing a direct product query
-            product_category = metadata.get("category", "").lower()
-            if product_category:
-                context["category_types"]["product"].add(product_category)
-                
-            product = {
-                "id": metadata.get("id"),
-                "name": metadata.get("name"),
-                "brand_id": metadata.get("brand_id"),
-                "category": product_category,
-                "store_name": metadata.get("brand_name_en"),
-                "image_url": metadata.get("image_url")
-            }
-            if not any(p.get("name") == product["name"] for p in context["products"]):
-                context["products"].append(product)
-            if metadata.get("brand_id"):
-                brand_ids.add(metadata["brand_id"])
-                
-        elif doc_type == "service":
-            service = {
-                "name": metadata.get("name"),
-                "description": metadata.get("description"),
-                "location": metadata.get("location"),
-                "image_url": metadata.get("icon_url")
-            }
-            if not any(s.get("name") == service["name"] for s in context["services"]):
-                context["services"].append(service)
-
-    # Fetch additional brand details for products
-    if brand_ids:
-        brands = await db_fetch_all_async(
-            """SELECT brand_id, brand_name_en, category_name, description_en, 
-               store_phone_number, store_email, store_website, pms_unit_codes,
-               brand_logo, banner_en, banner_ar 
-               FROM brands WHERE brand_id = ANY($1)""",
-            (list(brand_ids),)
-        )
-        brand_map = {b["brand_id"]: b for b in brands}
-        
-        for item in context["products"]:
-            if item.get("brand_id") in brand_map and not item.get("store_name"):
-                brand = brand_map[item["brand_id"]]
-                item["store_name"] = brand["brand_name_en"]
-                if "category" not in item and brand["category_name"]:
-                    item["category"] = brand["category_name"]
-                    context["category_types"]["product"].add(brand["category_name"].lower())
-                if "location" not in item and brand.get("pms_unit_codes"):
-                    item["location"] = brand["pms_unit_codes"]
-                if "image_url" not in item or not item["image_url"]:
-                    item["image_url"] = brand["brand_logo"] or brand["banner_en"] or brand["banner_ar"]
-
-    # If no stores found but resolved entity exists, try a direct DB lookup
-    if not context["stores"] and state.context_data and state.context_data.get("resolved_entity"):
-        store_name = state.context_data["resolved_entity"].lower()
-        stores = await db_fetch_all_async(
-            """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
-               b.store_phone_number, b.store_email, b.store_website, b.pms_unit_codes,
-               b.brand_logo, b.banner_en, b.banner_ar
-               FROM brands b 
-               JOIN brand_mall_association bma ON b.brand_id = bma.brand_id 
-               WHERE bma.unique_property_id = $1 AND LOWER(b.brand_name_en) LIKE $2""", 
-            (state.mall_id, f"%{store_name}%")
-        )
-        
-        for store in stores:
-            store_category = store.get("category_name", "").lower()
-            if store_category:
-                context["category_types"]["store"].add(store_category)
-                
-            # Extract image URL (prioritize brand logo, then banners)
-            image_url = None
-            if store.get("brand_logo"):
-                image_url = store["brand_logo"]
-            elif state.language == "ar" and store.get("banner_ar"):
-                image_url = store["banner_ar"]
-            elif store.get("banner_en"):
-                image_url = store["banner_en"]
-                
-            context["stores"].append({
-                "name": store["brand_name_en"],
-                "category": store_category,
-                "store_id": store["brand_id"],
-                "description": store.get("description_en", ""),
-                "phone": store.get("store_phone_number", ""),
-                "email": store.get("store_email", ""),
-                "website": store.get("store_website", ""),
-                "location": store.get("pms_unit_codes", {}),
-                "image_url": image_url
-            })
-    
-    # Filter results based on type_preference if provided
-    if state.type_preference:
-        type_pref = state.type_preference.lower()
-        
-        # Filter stores
-        if any(type_pref in category for category in context["category_types"]["store"]):
-            context["stores"] = [
-                store for store in context["stores"] 
-                if store.get("category", "").lower() and type_pref in store["category"].lower()
-            ]
-        
-        # Filter food places
-        elif any(type_pref in category for category in context["category_types"]["food"]):
-            food_stores = []
-            for store in context["stores"]:
-                category = store.get("category", "").lower()
-                description = store.get("description", "").lower()
-                
-                if (category and any(food_term in category for food_term in food_related_categories) and
-                    (type_pref in category or type_pref in description)):
-                    food_stores.append(store)
             
-            if food_stores:
-                context["stores"] = food_stores
+        # Add item details based on its metadata
+        # Only include fields that exist in the database
+        metadata = item["metadata"]
         
-        # Filter products
-        if any(type_pref in category for category in context["category_types"]["product"]):
-            context["products"] = [
-                product for product in context["products"]
-                if product.get("category", "").lower() and type_pref in product["category"].lower()
-                or product.get("description", "").lower() and type_pref in product["description"].lower()
-            ]
-    
-    # Convert sets to lists for JSON serialization
-    context["category_types"]["food"] = sorted(list(context["category_types"]["food"]))
-    context["category_types"]["product"] = sorted(list(context["category_types"]["product"]))
-    context["category_types"]["store"] = sorted(list(context["category_types"]["store"]))
+        # Construct detail string with validation to ensure no missing fields
+        detail = {}
+        
+        # Common fields
+        detail["id"] = metadata.get("id", "")
+        detail["type"] = metadata.get("type", "")
+        detail["score"] = item.get("score", 0)
+        
+        # Handle different types of data
+        if metadata.get("type") == "store":
+            # Store-specific fields (only include what's in the database)
+            detail["name"] = metadata.get("name", "")
+            detail["category"] = metadata.get("category", "")
+            detail["location"] = metadata.get("pms_unit_codes", "")
+            detail["description"] = metadata.get("description", "")
+            if "image_url" in metadata and metadata["image_url"]:
+                detail["image_url"] = metadata["image_url"]
+                
+        elif metadata.get("type") == "product":
+            # Product-specific fields
+            detail["name"] = metadata.get("name", "")
+            detail["price"] = metadata.get("price", "")
+            detail["brand_name"] = metadata.get("brand_name", "")
+            detail["description"] = metadata.get("description", "")
+            detail["store_name"] = metadata.get("store_name", "")
+            if "image_url" in metadata and metadata["image_url"]:
+                detail["image_url"] = metadata["image_url"]
+                
+        elif metadata.get("type") == "engagement":
+            # Engagement-specific fields (offers, events)
+            detail["title"] = metadata.get("title_en", "")
+            detail["brand_name"] = metadata.get("brand_name", "")
+            detail["start_date"] = metadata.get("start_date", "")
+            detail["end_date"] = metadata.get("end_date", "")
+            detail["description"] = metadata.get("description_en", "")
+            if "image_url" in metadata and metadata["image_url"]:
+                detail["image_url"] = metadata["image_url"]
+                
+        elif metadata.get("type") == "amenity" or metadata.get("type") == "service":
+            # Amenity/service-specific fields
+            detail["name"] = metadata.get("name", "")
+            detail["location"] = metadata.get("location", "")
+            detail["description"] = metadata.get("description", "")
+            if "image_url" in metadata and metadata["image_url"]:
+                detail["image_url"] = metadata["image_url"]
+                
+        # Add the structured detail to our results
+        details.append(detail)
 
-    # Check for any "address" requests and map them to pms_unit_codes
-    if state.query.lower().find("address") > -1 or state.query.lower().find("location") > -1 or state.query.lower().find("where") > -1:
-        for store in context["stores"]:
-            # Make sure we use pms_unit_codes for location information
-            if "pms_unit_codes" in store and not "location" in store:
-                store["location"] = store["pms_unit_codes"]
+    # Prepare the response with only database information
+    response = ""
     
-    # At the end, preprocess all location codes to readable format
-    # Process store locations
-    for store in context["stores"]:
-        if "location" in store:
-            store["location"] = convert_location_codes(store["location"])
-        # Also check for pms_unit_codes if location is not present
-        elif "pms_unit_codes" in store:
-            store["location"] = convert_location_codes(store["pms_unit_codes"])
+    # Add a prefix to indicate this is database content
+    response += "DATABASE CONTENT:\n\n"
     
-    # Process product locations via store
-    for product in context["products"]:
-        if "location" in product:
-            product["location"] = convert_location_codes(product["location"])
-        # Also check for pms_unit_codes if location is not present
-        elif "pms_unit_codes" in product:
-            product["location"] = convert_location_codes(product["pms_unit_codes"])
-    
-    # Process service locations
-    for service in context["services"]:
-        if "location" in service:
-            service["location"] = convert_location_codes(service["location"])
-        # Also check for pms_unit_codes if location is not present
-        elif "pms_unit_codes" in service:
-            service["location"] = convert_location_codes(service["pms_unit_codes"])
-    
-    # Process neighboring stores locations
-    for store in context["neighboring_stores"]:
-        if "location" in store:
-            store["location"] = convert_location_codes(store["location"])
-        # Also check for pms_unit_codes if location is not present
-        elif "pms_unit_codes" in store:
-            store["location"] = convert_location_codes(store["pms_unit_codes"])
+    # Format the details as a structured response
+    if details:
+        for i, detail in enumerate(details):
+            response += f"Item {i+1}:\n"
+            # Only include fields that have values (from the database)
+            for key, value in detail.items():
+                if value:  # Only include non-empty values
+                    response += f"- {key}: {value}\n"
+            response += "\n"
+    else:
+        response = "No relevant information found in the database."
 
-    state.context_data = context
-    state.response = json.dumps(convert_to_json_safe(context))
+    # Set the response with only data from the database
+    state.response = response
+    
+    # Log the refined context for debugging
+    logger.info(f"Refined context (first 200 chars): {state.response[:200]}...")
+    
     return state
 
 # Add back the generate_response function with conversation tracking
 async def generate_response(state: CustomerState) -> CustomerState:
-    if not state.mall_id:
-        if state.language == "ar":
-            state.response = "عذراً! أحتاج إلى معرفة المركز التجاري الذي تسأل عنه. يرجى اختيار مركز تجاري أولاً! 😊"
-        else:
-            state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
-        return state
+    # Format conversation history
+    formatted_history = format_conversation_history(state.conversation_history, state.language)
     
-    # Check if we have a cached response
-    cache_key = f"response:{state.query}:{state.intent}:{state.mall_id}:{state.query_type}:{state.topic_turn_count}:{state.language}"
-    cached_response = optimized_cache.get(cache_key)
-    if cached_response:
-        state.response = cached_response.get("response", "")
-        state.response_format = cached_response.get("response_format")
-        return state
-
-    # Format conversation history efficiently
-    # Only include the latest 6 messages to keep context window smaller
-    formatted_history = "\n".join([
-        f"{msg['role'].upper()}: {msg['content']}" 
-        for msg in state.conversation_history[-6:]
-    ]) if state.conversation_history else "No prior conversation."
+    # Get mall name for the prompt
+    mall_name = "Cenomi Mall"  # Default
+    if state.mall_id and hasattr(state, "mall_data") and state.mall_data:
+        mall_info = state.mall_data.get("mall_information", {})
+        if mall_info and isinstance(mall_info, dict):
+            mall_name_key = "NameEn" if state.language == "en" else "NameAr"
+            mall_name = mall_info.get(mall_name_key, "Cenomi Mall")
     
-    # Pass type_preference and needs_type_follow_up
-    mall_name = "the mall"
+    # Get resolved entity if available
     resolved_entity = ""
+    if state.context_data and state.context_data.get("resolved_entity"):
+        resolved_entity = state.context_data.get("resolved_entity")
     
-    if state.context_data:
-        mall_name = state.context_data.get("mall_name", "the mall")
-        resolved_entity = state.context_data.get("resolved_entity", "")
-    
-    # Detect follow-up type preferences in the conversation history more efficiently
-    if state.conversation_history and not state.type_preference and state.needs_type_follow_up:
-        # This is CPU-bound, use a thread pool
-        state.type_preference = await asyncio.to_thread(
-            extract_type_preference, 
-            state.conversation_history,
-            state.language
-        )
-        
-        if state.type_preference:
-            state.needs_type_follow_up = False
-    
-    # Track conversation topic for multi-turn handling
-    current_topic = state.query_type or ""
-    if state.intent:
-        current_topic += "_" + state.intent
-    
-    # If we have a resolved entity, add it to the topic for better tracking
-    if resolved_entity:
-        current_topic += "_" + resolved_entity.lower().replace(" ", "_")
-    
-    # Check if this is continuing the same conversation topic
-    if state.conversation_topic and current_topic and state.conversation_topic in current_topic:
-        # Still on the same general topic
-        state.topic_turn_count += 1
-    else:
-        # New topic
-        state.conversation_topic = current_topic
-        state.topic_turn_count = 1
-    
-    # Log conversation state for debugging
-    logger.info(f"CONVERSATION STATE: Topic: {state.conversation_topic}, Turn count: {state.topic_turn_count}, Intent: {state.intent}, Query type: {state.query_type}")
+    logger.info(f"Generating response with context: {state.response[:100] if state.response else ''}...")
     
     try:
+        # Ensure we have valid context data
+        if not state.response or state.response.strip() == "":
+            if state.language == "ar":
+                state.response = "لم أتمكن من العثور على معلومات حول ذلك. هل يمكنك توضيح استفسارك؟"
+            else:
+                state.response = "I couldn't find information about that. Could you clarify your question?"
+            return state
+        
+        # Ensure we're only using database data
+        context_data = state.response
+        
+        # Add a warning for developers about hallucination
+        context_data = f"""
+IMPORTANT FOR SYSTEM: This is database information only. NEVER invent or hallucinate additional details.
+If information is not found, clearly state that you don't have that information.
+
+{context_data}
+"""
+        
         # Use a more efficient approach with asyncio
         input_dict = {
-            "context": state.response,
+            "context": context_data,
             "query": state.query,
             "lang": state.language,
             "conversation_history": formatted_history,
@@ -1855,29 +1503,22 @@ async def generate_response(state: CustomerState) -> CustomerState:
             "conversation_topic": state.conversation_topic
         }
         
+        # The customer_chain returns a string, not a dictionary
         response = await asyncio.to_thread(customer_chain.invoke, input_dict)
         
-        # Process the response using a thread pool for CPU-bound operations
-        response_format = await asyncio.to_thread(
-            process_response,
-            response,
-            state.intent,
-            state.topic_turn_count
-        )
+        # Check for empty response
+        if not response or len(response.strip()) == 0:
+            if state.language == "ar":
+                state.response = "أواجه مشكلة في معالجة طلبك حاليًا. يرجى المحاولة مرة أخرى."
+            else:
+                state.response = "I'm having trouble processing your request right now. Please try again."
+            return state
         
-        # Store the response format as a serializable dictionary
-        state.response_format = response_format
+        # Format response for display - response is already a string
         state.response = response
         
-        # Cache the result
-        optimized_cache.set(
-            cache_key, 
-            {
-                "response": response,
-                "response_format": response_format
-            },
-            ex=300  # 5 minutes
-        )
+        # Post-process to remove any hallucinated store or product references
+        # Implement more strict filtering if needed
         
     except Exception as e:
         logger.error(f"Error generating response: {e}")
@@ -2288,8 +1929,10 @@ class OptimizedCache:
                 # Update memory cache
                 self.memory_cache[key] = result
                 return result
-            except (json.JSONDecodeError, ValueError):
-                pass
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.error(f"Error decoding cached value for {key}: {e}")
+                # Return the raw value if JSON parsing fails
+                return cached
         return None
         
     def set(self, key, value, ex=None):
@@ -2297,8 +1940,11 @@ class OptimizedCache:
         ttl = ex or self.ttl
         # Set in memory cache
         self.memory_cache[key] = value
-        # Set in Redis with expiry
-        self.redis.set(key, json.dumps(value, cls=DateTimeEncoder), ex=ttl)
+        try:
+            # Set in Redis with expiry
+            self.redis.set(key, json.dumps(value, cls=DateTimeEncoder), ex=ttl)
+        except Exception as e:
+            logger.error(f"Error setting cache for {key}: {e}")
 
 # Initialize optimized cache
 optimized_cache = OptimizedCache(REDIS_CLIENT)
@@ -2443,17 +2089,58 @@ async def optimized_vector_search(query: str, filter_dict: Dict[str, Any], top_k
             query
         )
         
-        # Perform the vector search
-        results = await asyncio.to_thread(
-            index.query,
-            vector=query_vector,
-            top_k=top_k,
-            include_metadata=True,
-            filter=filter_dict
-        )
+        # Ensure filter_dict is properly formatted for Pinecone
+        # Convert any type fields from string to int if needed
+        if filter_dict and "type" in filter_dict and isinstance(filter_dict["type"], str):
+            # Create a mapping of type names to integers if needed by your schema
+            type_mapping = {
+                "product": 1,
+                "store": 2,
+                "service": 3,
+                "engagement": 4,
+                "amenity": 5
+            }
+            
+            # Convert string type to int if in mapping
+            if filter_dict["type"] in type_mapping:
+                filter_dict["type"] = type_mapping[filter_dict["type"]]
         
-        matches = results.get("matches", [])
-        search_results = [{"id": doc["id"], "score": float(doc["score"]), "metadata": doc["metadata"]} for doc in matches]
+        # Perform the vector search with proper error handling
+        try:
+            results = await asyncio.to_thread(
+                index.query,
+                vector=query_vector,
+                top_k=top_k,
+                include_metadata=True,
+                filter=filter_dict
+            )
+            
+            # Safety check for results
+            if not results or not isinstance(results, dict):
+                logger.warning(f"Unexpected results format from Pinecone: {type(results)}")
+                return []
+                
+            # Safely extract matches
+            matches = results.get("matches", [])
+            if not isinstance(matches, list):
+                logger.warning(f"Unexpected matches format in Pinecone results: {type(matches)}")
+                return []
+                
+            # Process results safely
+            search_results = []
+            for doc in matches:
+                if isinstance(doc, dict) and "id" in doc and "score" in doc and "metadata" in doc:
+                    search_results.append({
+                        "id": doc["id"],
+                        "score": float(doc["score"]), 
+                        "metadata": doc["metadata"]
+                    })
+                else:
+                    logger.warning(f"Skipping invalid match in Pinecone results: {doc}")
+                
+        except Exception as pinecone_error:
+            logger.error(f"Error in Pinecone query: {pinecone_error}")
+            return []
         
         # Cache the results
         optimized_cache.set(cache_key, search_results, ex=300)  # 5 minute cache
@@ -2472,32 +2159,40 @@ async def parallel_db_fetch(queries):
 # Modified classify_query_type and classify_intent to use the optimized classification
 async def classify_query_type(state: CustomerState) -> CustomerState:
     combined_result = await optimized_classification(state)
-    state.query_type = combined_result["query_type"]
-    logger.info(f"Classified query type: {state.query_type}")
+    if combined_result:
+        state.query_type = combined_result.get("query_type")
+        logger.info(f"Classified query type: {state.query_type}")
+    else:
+        logger.warning("Could not classify query type")
+        state.query_type = "general_query"  # Default fallback
     return state
 
 async def classify_intent(state: CustomerState) -> CustomerState:
     # Reuse the same result from combined classification if already performed
-    if hasattr(state, "_combined_classification_result"):
+    if hasattr(state, "_combined_classification_result") and state._combined_classification_result:
         combined_result = state._combined_classification_result
     else:
         combined_result = await optimized_classification(state)
         state._combined_classification_result = combined_result
     
-    state.intent = combined_result["intent"]
+    # Ensure we have a valid intent, defaulting to fallback if none
+    state.intent = combined_result.get("intent") if combined_result else "other_general"
     state.context_data = state.context_data or {}
     
     # Set resolved entity if present
-    if combined_result["resolved_entity"]:
+    if combined_result and combined_result.get("resolved_entity"):
         state.context_data["resolved_entity"] = combined_result["resolved_entity"]
     
     # Set type preference if present
-    state.type_preference = combined_result["type_preference"]
+    if combined_result and combined_result.get("type_preference"):
+        state.type_preference = combined_result["type_preference"]
     
     # Determine if we need a type follow-up
-    state.needs_type_follow_up = combined_result["needs_type_follow_up"]
+    if combined_result:
+        state.needs_type_follow_up = combined_result.get("needs_type_follow_up", False)
     
-    if state.intent.startswith("other_"):
+    # Only check startswith if state.intent is not None
+    if state.intent and state.intent.startswith("other_"):
         state.response = "I'm not sure what you mean 😅. Could you tell me more?"
     
     logger.info(f"Classified intent: {state.intent}, Resolved entity: {state.context_data.get('resolved_entity')}, Type preference: {state.type_preference}")
@@ -2601,163 +2296,113 @@ async def parallel_context_fetch(mall_id: int, entity_name: str = None, current_
 
 # Optimize the refine_context function which is a major bottleneck
 async def refine_context(state: CustomerState) -> CustomerState:
+    """
+    Refine the context based on the intent and query type.
+    This function ensures we're only using data from the database or vector store.
+    """
     if not state.mall_id:
         state.response = "Please select a mall first."
         return state
 
-    # Use cache to avoid repeated processing
-    cache_key = f"refined_context:{state.query}:{state.intent}:{state.mall_id}:{state.query_type}:{state.type_preference}"
-    cached_context = optimized_cache.get(cache_key)
-    if cached_context:
-        state.context_data = cached_context
-        state.response = json.dumps(convert_to_json_safe(cached_context))
+    # Check if we have any initial context
+    if not state.initial_context or len(state.initial_context) == 0:
+        logger.warning("No initial context found for refining")
+        if state.language == "ar":
+            state.response = "عذراً، لا يمكنني العثور على معلومات ذات صلة. هل يمكنك إعادة صياغة سؤالك؟"
+        else:
+            state.response = "Sorry, I couldn't find any relevant information. Could you rephrase your question?"
         return state
 
-    context = {
-        "stores": [],
-        "offers": [],
-        "events": [],
-        "products": [],
-        "services": [],
-        "amenities": [],
-        "mall_name": "",
-        "neighboring_stores": [],
-        "category_types": {
-            "food": set(),
-            "product": set(),
-            "store": set()
-        }
-    }
+    # Sort initial context by score for better retrieval (higher scores first)
+    state.initial_context = sorted(state.initial_context, key=lambda x: x.get("score", 0), reverse=True)
     
-    # Get current date for filtering engagements
-    current_date = datetime.now().isoformat()
-    
-    # Fetch all data in parallel
-    entity_name = state.context_data.get("resolved_entity", "") if state.context_data else ""
-    context_data = await parallel_context_fetch(state.mall_id, entity_name, current_date)
-    
-    # Process mall information
-    mall_info = context_data["mall_info"]
-    if mall_info:
-        context["mall_name"] = mall_info.get("marketing_name", "Unknown Mall")
+    # Limit to top 10 results for performance 
+    top_results = state.initial_context[:10]
+
+    # Create a detailed context from the database results
+    details = []
+    for item in top_results:
+        # Skip if no metadata (shouldn't happen with proper retrieval)
+        if not item.get("metadata"):
+            continue
+            
+        # Add item details based on its metadata
+        # Only include fields that exist in the database
+        metadata = item["metadata"]
         
-        # Extract address and other mall data
-        if mall_info.get("mall_information"):
-            try:
-                mall_data = mall_info["mall_information"]
-                if isinstance(mall_data, str):
-                    mall_data = json.loads(mall_data)
-                    
-                # Process mall data as before...
-                # This part remains the same but moved to a separate function for clarity
-                mall_metadata = await asyncio.to_thread(
-                    extract_mall_metadata, 
-                    mall_data, 
-                    mall_info
-                )
+        # Construct detail string with validation to ensure no missing fields
+        detail = {}
+        
+        # Common fields
+        detail["id"] = metadata.get("id", "")
+        detail["type"] = metadata.get("type", "")
+        detail["score"] = item.get("score", 0)
+        
+        # Handle different types of data
+        if metadata.get("type") == "store":
+            # Store-specific fields (only include what's in the database)
+            detail["name"] = metadata.get("name", "")
+            detail["category"] = metadata.get("category", "")
+            detail["location"] = metadata.get("pms_unit_codes", "")
+            detail["description"] = metadata.get("description", "")
+            if "image_url" in metadata and metadata["image_url"]:
+                detail["image_url"] = metadata["image_url"]
                 
-                # Add mall metadata to context if needed
-                if state.query_type in ["mall_info_query", "visit_planning_query"]:
-                    context["mall_metadata"] = mall_metadata
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.error(f"Error processing mall_information JSON: {e}")
+        elif metadata.get("type") == "product":
+            # Product-specific fields
+            detail["name"] = metadata.get("name", "")
+            detail["price"] = metadata.get("price", "")
+            detail["brand_name"] = metadata.get("brand_name", "")
+            detail["description"] = metadata.get("description", "")
+            detail["store_name"] = metadata.get("store_name", "")
+            if "image_url" in metadata and metadata["image_url"]:
+                detail["image_url"] = metadata["image_url"]
+                
+        elif metadata.get("type") == "engagement":
+            # Engagement-specific fields (offers, events)
+            detail["title"] = metadata.get("title_en", "")
+            detail["brand_name"] = metadata.get("brand_name", "")
+            detail["start_date"] = metadata.get("start_date", "")
+            detail["end_date"] = metadata.get("end_date", "")
+            detail["description"] = metadata.get("description_en", "")
+            if "image_url" in metadata and metadata["image_url"]:
+                detail["image_url"] = metadata["image_url"]
+                
+        elif metadata.get("type") == "amenity" or metadata.get("type") == "service":
+            # Amenity/service-specific fields
+            detail["name"] = metadata.get("name", "")
+            detail["location"] = metadata.get("location", "")
+            detail["description"] = metadata.get("description", "")
+            if "image_url" in metadata and metadata["image_url"]:
+                detail["image_url"] = metadata["image_url"]
+                
+        # Add the structured detail to our results
+        details.append(detail)
+
+    # Prepare the response with only database information
+    response = ""
     
-    # Process store data - use thread pool for CPU-bound operations
-    target_store_data = None
-    store_name = entity_name.lower() if entity_name else ""
+    # Add a prefix to indicate this is database content
+    response += "DATABASE CONTENT:\n\n"
     
-    # Process stores data with more efficient handling using a thread pool for CPU-bound tasks
-    process_stores_task = asyncio.create_task(
-        asyncio.to_thread(
-            process_stores,
-            context_data["stores"],
-            store_name,
-            state.language,
-            state.type_preference
-        )
-    )
+    # Format the details as a structured response
+    if details:
+        for i, detail in enumerate(details):
+            response += f"Item {i+1}:\n"
+            # Only include fields that have values (from the database)
+            for key, value in detail.items():
+                if value:  # Only include non-empty values
+                    response += f"- {key}: {value}\n"
+            response += "\n"
+    else:
+        response = "No relevant information found in the database."
+
+    # Set the response with only data from the database
+    state.response = response
     
-    # Process engagements (offers and events) in parallel
-    process_engagements_task = asyncio.create_task(
-        asyncio.to_thread(
-            process_engagements,
-            context_data["engagements"],
-            state.language
-        )
-    )
+    # Log the refined context for debugging
+    logger.info(f"Refined context (first 200 chars): {state.response[:200]}...")
     
-    # Process products in parallel
-    process_products_task = None
-    if state.intent and state.intent.startswith("product_"):
-        process_products_task = asyncio.create_task(
-            asyncio.to_thread(
-                process_products,
-                context_data["products"],
-                state.type_preference
-            )
-        )
-    
-    # Process services in parallel
-    process_services_task = asyncio.create_task(
-        asyncio.to_thread(
-            process_services,
-            context_data["services"]
-        )
-    )
-    
-    # Wait for all processing tasks to complete
-    stores_result = await process_stores_task
-    context["stores"] = stores_result["stores"]
-    context["category_types"]["store"] = stores_result["store_categories"]
-    context["category_types"]["food"] = stores_result["food_categories"]
-    target_store_data = stores_result.get("target_store")
-    
-    engagements_result = await process_engagements_task
-    context["offers"] = engagements_result["offers"]
-    context["events"] = engagements_result["events"]
-    
-    if process_products_task:
-        products_result = await process_products_task
-        context["products"] = products_result["products"]
-        context["category_types"]["product"] = products_result["product_categories"]
-    
-    services_result = await process_services_task
-    context["services"] = services_result
-    
-    # Find neighboring stores if a specific store was searched for
-    if target_store_data and target_store_data.get("location"):
-        # This is CPU-bound, so use thread pool
-        context["neighboring_stores"] = await asyncio.to_thread(
-            find_neighboring_stores,
-            target_store_data,
-            context["stores"],
-            5  # Limit to 5 neighbors
-        )
-    
-    # Process any vector search results from initial context if needed
-    if state.initial_context:
-        # Use thread pool for this CPU-bound operation
-        context = await asyncio.to_thread(
-            process_vector_results,
-            state.initial_context,
-            context,
-            state.mall_id,
-            state.intent
-        )
-    
-    # Convert sets to lists for JSON serialization
-    context["category_types"]["food"] = sorted(list(context["category_types"]["food"]))
-    context["category_types"]["product"] = sorted(list(context["category_types"]["product"]))
-    context["category_types"]["store"] = sorted(list(context["category_types"]["store"]))
-    
-    # Final processing of location codes
-    await asyncio.to_thread(process_all_location_codes, context)
-    
-    # Cache the result
-    optimized_cache.set(cache_key, context, ex=300)  # 5 minute cache
-    
-    state.context_data = context
-    state.response = json.dumps(convert_to_json_safe(context))
     return state
 
 # Helper functions for parallel processing
@@ -3180,7 +2825,8 @@ async def retrieve_context(state: CustomerState) -> CustomerState:
     # Modify search query based on query type
     if state.query_type == "product_info_query":
         search_query = f"product {entity_name if entity_name else state.query}"
-        filter_dict["type"] = "product"
+        # Using integer value for type according to the mapping
+        filter_dict["type"] = 1  # 1 represents "product" in our mapping
         
     elif state.query_type == "mall_info_query":
         search_query = f"mall information {state.query}"
@@ -3192,7 +2838,8 @@ async def retrieve_context(state: CustomerState) -> CustomerState:
         
     elif state.query_type == "services_info_query":
         search_query = f"mall service {state.query}"
-        filter_dict["type"] = "service"
+        # Using integer value for type according to the mapping
+        filter_dict["type"] = 3  # 3 represents "service" in our mapping
         
     elif state.query_type == "family_planning_query":
         search_query = f"family children activities {state.query}"
@@ -3316,3 +2963,13 @@ customer_workflow.add_edge("respond", END)
 
 # Compile the workflow
 customer_graph = customer_workflow.compile()
+
+def format_conversation_history(conversation_history, language):
+    """Format the conversation history for the prompt."""
+    # Only include the latest 6 messages to keep context window smaller
+    formatted_history = "\n".join([
+        f"{msg['role'].upper()}: {msg['content']}" 
+        for msg in conversation_history[-6:]
+    ]) if conversation_history else "No prior conversation."
+    
+    return formatted_history
