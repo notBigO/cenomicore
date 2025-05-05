@@ -11,7 +11,7 @@ import os
 import asyncio
 from pinecone import Pinecone
 from langchain_huggingface import HuggingFaceEmbeddings
-from utils import db_fetch_all_async, db_fetch_one_async, convert_to_json_safe, DateTimeEncoder, REDIS_CLIENT, logger
+from src.utils import db_fetch_all_async, db_fetch_one_async, convert_to_json_safe, DateTimeEncoder, REDIS_CLIENT, logger
 import networkx as nx
 import spacy
 from langchain_openai import ChatOpenAI
