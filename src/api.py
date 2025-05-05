@@ -15,7 +15,7 @@ from src.utils import (
     get_memory_cache, set_memory_cache, strip_markdown
 )
 from src.customer import CustomerState, customer_graph
-from src.tenant import TenantState, tenant_graph
+# from src.tenant import TenantState, tenant_graph
 from typing import Optional, List, Dict, Any
 from langsmith import Client
 from langsmith import trace
@@ -447,84 +447,84 @@ async def chat(request: ChatRequest):
         
         return ChatResponse(**response_data)
 
-@app.post("/tenant/update")
-async def tenant_update(request: UpdateRequest):
-    logger.info(f"Received tenant update request: {request.text}, user_id: {request.user_id}")
+# @app.post("/tenant/update")
+# async def tenant_update(request: UpdateRequest):
+#     logger.info(f"Received tenant update request: {request.text}, user_id: {request.user_id}")
     
-    if not request.user_id.startswith("t_"):
-        logger.error("Non-tenant user attempted update")
-        raise HTTPException(status_code=403, detail="Only tenants can perform updates")
+#     if not request.user_id.startswith("t_"):
+#         logger.error("Non-tenant user attempted update")
+#         raise HTTPException(status_code=403, detail="Only tenants can perform updates")
     
-    tenant_id = int(request.user_id[2:])
-    tenant = await db_fetch_one_async(
-        "SELECT tenant_id FROM tenants WHERE tenant_id = $1",
-        (tenant_id,)
-    )
-    if not tenant:
-        logger.error(f"Invalid tenant ID: {tenant_id}")
-        raise HTTPException(status_code=403, detail="Invalid tenant ID")
+#     tenant_id = int(request.user_id[2:])
+#     tenant = await db_fetch_one_async(
+#         "SELECT tenant_id FROM tenants WHERE tenant_id = $1",
+#         (tenant_id,)
+#     )
+#     if not tenant:
+#         logger.error(f"Invalid tenant ID: {tenant_id}")
+#         raise HTTPException(status_code=403, detail="Invalid tenant ID")
     
-    lang = request.language or "en"
-    conversation_id = await get_or_create_conversation(request.conversation_id, request.user_id, lang)
-    history = await get_history(conversation_id)
+#     lang = request.language or "en"
+#     conversation_id = await get_or_create_conversation(request.conversation_id, request.user_id, lang)
+#     history = await get_history(conversation_id)
     
-    conv_state = await db_fetch_one_async(
-        "SELECT meta_data FROM conversations WHERE id = $1",
-        (conversation_id,)
-    )
-    state_dict = {}
-    if conv_state and conv_state.get("meta_data"):
-        try:
-            meta_data = json.loads(conv_state["meta_data"])
-            if "state" in meta_data:
-                state_dict = meta_data["state"]
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.error(f"Invalid meta_data for conversation {conversation_id}: {e}")
+#     conv_state = await db_fetch_one_async(
+#         "SELECT meta_data FROM conversations WHERE id = $1",
+#         (conversation_id,)
+#     )
+#     state_dict = {}
+#     if conv_state and conv_state.get("meta_data"):
+#         try:
+#             meta_data = json.loads(conv_state["meta_data"])
+#             if "state" in meta_data:
+#                 state_dict = meta_data["state"]
+#         except (json.JSONDecodeError, ValueError) as e:
+#             logger.error(f"Invalid meta_data for conversation {conversation_id}: {e}")
     
-    if state_dict:
-        try:
-            state = TenantState(**state_dict)
-            state.query = request.text
-            state.conversation_history = history
-        except (json.JSONDecodeError, ValueError):
-            logger.error(f"Invalid state data for conversation {conversation_id}, resetting to new state")
-            state = TenantState(
-                query=request.text,
-                user_id=request.user_id,
-                language=lang,
-                conversation_id=conversation_id,
-                conversation_history=history
-            )
-    else:
-        state = TenantState(
-            query=request.text,
-            user_id=request.user_id,
-            language=lang,
-            conversation_id=conversation_id,
-            conversation_history=history
-        )
+#     if state_dict:
+#         try:
+#             state = TenantState(**state_dict)
+#             state.query = request.text
+#             state.conversation_history = history
+#         except (json.JSONDecodeError, ValueError):
+#             logger.error(f"Invalid state data for conversation {conversation_id}, resetting to new state")
+#             state = TenantState(
+#                 query=request.text,
+#                 user_id=request.user_id,
+#                 language=lang,
+#                 conversation_id=conversation_id,
+#                 conversation_history=history
+#             )
+#     else:
+#         state = TenantState(
+#             query=request.text,
+#             user_id=request.user_id,
+#             language=lang,
+#             conversation_id=conversation_id,
+#             conversation_history=history
+#         )
 
-    logger.info(f"Invoking tenant graph with query: {request.text}")
-    with trace(name="TenantUpdate", inputs={"query": request.text, "user_id": request.user_id}):
-        result = await tenant_graph.ainvoke(state)
+#     logger.info(f"Invoking tenant graph with query: {request.text}")
+#     with trace(name="TenantUpdate", inputs={"query": request.text, "user_id": request.user_id}):
+#         result = await tenant_graph.ainvoke(state)
     
-    meta_data = {"language": lang, "state": result}
-    meta_data_json = json.dumps(meta_data, cls=DateTimeEncoder)
+#     meta_data = {"language": lang, "state": result}
+#     meta_data_json = json.dumps(meta_data, cls=DateTimeEncoder)
     
-    # Perform these operations concurrently
-    tasks = [
-        db_execute_async(
-            "UPDATE conversations SET meta_data = $1 WHERE id = $2",
-            (meta_data_json, conversation_id)
-        ),
-        add_message(conversation_id, "user", request.text),
-        add_message(conversation_id, "assistant", result["response"]),
-    ]
-    await asyncio.gather(*tasks)
+#     # Perform these operations concurrently
+#     tasks = [
+#         db_execute_async(
+#             "UPDATE conversations SET meta_data = $1 WHERE id = $2",
+#             (meta_data_json, conversation_id)
+#         ),
+#         add_message(conversation_id, "user", request.text),
+#         add_message(conversation_id, "assistant", result["response"]),
+#     ]
+#     await asyncio.gather(*tasks)
 
-    await asyncio.to_thread(REDIS_CLIENT.delete, f"history:{conversation_id}")
+#     await asyncio.to_thread(REDIS_CLIENT.delete, f"history:{conversation_id}")
     
-    return {"message": result["response"], "conversation_id": conversation_id}
+#     return {"message": result["response"], "conversation_id": conversation_id}
 
 @app.get("/")
 async def root():
