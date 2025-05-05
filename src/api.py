@@ -20,7 +20,7 @@ from typing import Optional, List, Dict, Any
 from langsmith import Client
 from langsmith import trace
 import os
-from customer import populate_knowledge_graph
+from src.customer import populate_knowledge_graph
 import uuid
 from io import BytesIO
 import functools
