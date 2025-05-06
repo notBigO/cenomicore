@@ -10,7 +10,7 @@ import os
 import asyncio
 from pinecone import Pinecone
 from langchain_huggingface import HuggingFaceEmbeddings
-from src.utils import db_fetch_all_async, db_fetch_one_async, convert_to_json_safe, DateTimeEncoder, REDIS_CLIENT, logger
+from utils import db_fetch_all_async, db_fetch_one_async, convert_to_json_safe, DateTimeEncoder, REDIS_CLIENT, logger
 import networkx as nx
 import spacy
 from langchain_openai import ChatOpenAI
@@ -1943,7 +1943,7 @@ async def fetch_loyalty_data(state: CustomerState) -> CustomerState:
 
 # Update the workflow
 customer_workflow = StateGraph(CustomerState)
-customer_workflow.add_node("classify_query_type", classify_query_type)
+# customer_workflow.add_node("classify_query_type", classify_query_type)
 customer_workflow.add_node("classify_intent", classify_intent)
 customer_workflow.add_node("retrieve_product_context", retrieve_product_context)
 customer_workflow.add_node("retrieve_mall_context", retrieve_mall_context)
@@ -1951,16 +1951,16 @@ customer_workflow.add_node("retrieve_offer_event_context", retrieve_offer_event_
 customer_workflow.add_node("retrieve_services_context", retrieve_services_context)
 customer_workflow.add_node("retrieve_family_planning_context", retrieve_family_planning_context)
 customer_workflow.add_node("retrieve_visit_planning_context", retrieve_visit_planning_context)
-customer_workflow.add_node("retrieve_fallback_context", retrieve_fallback_context)
+# customer_workflow.add_node("retrieve_fallback_context", retrieve_fallback_context)
 customer_workflow.add_node("refine_context", refine_context)
 customer_workflow.add_node("respond", generate_response)
 customer_workflow.add_node("fetch_loyalty_data", fetch_loyalty_data)
 
 # Set entry point to the new node
-customer_workflow.set_entry_point("classify_query_type")
+customer_workflow.set_entry_point("classify_intent")
 
 # Route from query_type classification to intent classification
-customer_workflow.add_edge("classify_query_type", "classify_intent")
+# customer_workflow.add_edge("classify_query_type", "classify_intent")
 
 # Route from intent classification to the appropriate context retrieval function
 def route_after_intent_classify(state: CustomerState):
@@ -1980,10 +1980,10 @@ def route_after_intent_classify(state: CustomerState):
             return "retrieve_services_context"
         elif state.query_type == "family_planning_query":
             return "retrieve_family_planning_context"
-        elif state.query_type == "visit_planning_query":
-            return "retrieve_visit_planning_context"
         else:
-            return "retrieve_fallback_context"
+            return "retrieve_visit_planning_context"
+        # else:
+        #     return "retrieve_fallback_context"
     
 customer_workflow.add_conditional_edges(
     "classify_intent",
@@ -1997,7 +1997,7 @@ customer_workflow.add_conditional_edges(
         "retrieve_services_context": "retrieve_services_context",
         "retrieve_family_planning_context": "retrieve_family_planning_context",
         "retrieve_visit_planning_context": "retrieve_visit_planning_context",
-        "retrieve_fallback_context": "retrieve_fallback_context",
+        # "retrieve_fallback_context": "retrieve_fallback_context",
     }
 )
 
@@ -2008,7 +2008,7 @@ customer_workflow.add_edge("retrieve_offer_event_context", "refine_context")
 customer_workflow.add_edge("retrieve_services_context", "refine_context")
 customer_workflow.add_edge("retrieve_family_planning_context", "refine_context")
 customer_workflow.add_edge("retrieve_visit_planning_context", "refine_context")
-customer_workflow.add_edge("retrieve_fallback_context", "refine_context")
+# customer_workflow.add_edge("retrieve_fallback_context", "refine_context")
 
 # Finish the workflow
 customer_workflow.add_edge("fetch_loyalty_data", END)

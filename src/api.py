@@ -6,7 +6,7 @@ import json
 from fastapi.responses import StreamingResponse
 import base64
 import requests
-from src.utils import (
+from utils import (
     detect_language, get_or_create_conversation, db_fetch_all_async, 
     get_conversation_history, add_message_to_conversation, db_fetch_one_async, 
     db_execute_async, DateTimeEncoder, logger, get_db_pool, REDIS_CLIENT,
@@ -14,13 +14,13 @@ from src.utils import (
     SHORT_CACHE_TTL, MEDIUM_CACHE_TTL, LONG_CACHE_TTL, EXTENDED_CACHE_TTL,
     get_memory_cache, set_memory_cache, strip_markdown
 )
-from src.customer import CustomerState, customer_graph
+from customer import CustomerState, customer_graph
 # from src.tenant import TenantState, tenant_graph
 from typing import Optional, List, Dict, Any
 from langsmith import Client
 from langsmith import trace
 import os
-from src.customer import populate_knowledge_graph
+from customer import populate_knowledge_graph
 import uuid
 from io import BytesIO
 import functools
@@ -446,6 +446,116 @@ async def chat(request: ChatRequest):
         logger.error(f"CHAT ERROR DETAILS: {str(e)}")
         
         return ChatResponse(**response_data)
+
+@app.post("/chat-stream")
+async def chat_stream(request: ChatRequest):
+    async def stream_response():
+        try:
+            text = request.text or ""
+            language = request.language
+            if not language:
+                def detect_lang():
+                    try:
+                        return detect_language(text) or "en"
+                    except:
+                        return "en"
+                language = await asyncio.to_thread(detect_lang)
+            
+            # Create or get conversation
+            conversation_id = await get_or_create_conversation(request.conversation_id, request.user_id, language)
+            
+            # Get conversation history
+            history = await get_history_cached(conversation_id)
+            
+            # Fetch conversation data
+            conv_data = await db_fetch_one_async(
+                "SELECT meta_data FROM conversations WHERE id = $1",
+                (conversation_id,)
+            )
+            
+            # Extract state data
+            state_data = {}
+            if conv_data and conv_data.get("meta_data"):
+                try:
+                    meta_data = json.loads(conv_data["meta_data"])
+                    if "state" in meta_data:
+                        state_data = meta_data["state"]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            
+            # Clean up state data to prevent conflicts
+            for key in ['query', 'user_id', 'language', 'conversation_id', 'conversation_history', 'mall_id']:
+                state_data.pop(key, None)
+            
+            # Prepare state for graph
+            state = CustomerState(
+                query=text,
+                user_id=request.user_id,
+                language=language,
+                conversation_id=conversation_id,
+                conversation_history=history,
+                mall_id=request.mall_id,
+                **state_data
+            )
+            
+            # Run the graph to get the full response
+            result = await customer_graph.ainvoke(state)
+            response_text = result["response"]
+            
+            # First yield the conversation_id to the client
+            yield json.dumps({"conversation_id": conversation_id}) + "\n"
+            
+            # Stream the response with a slower pace for better readability
+            chunk_size = 1  # Stream character by character for a smoother experience
+            
+            for i in range(0, len(response_text), chunk_size):
+                chunk = response_text[i:i+chunk_size]
+                yield chunk
+                await asyncio.sleep(0.01)  # Slow down the streaming for visibility
+            
+            # Store user message and bot response in conversation history
+            await asyncio.gather(
+                add_message(conversation_id, "user", text),
+                add_message(conversation_id, "assistant", response_text)
+            )
+            
+            # Update conversation metadata
+            updated_history = history + [
+                {"role": "user", "content": text},
+                {"role": "assistant", "content": response_text}
+            ]
+            result["conversation_history"] = updated_history
+            
+            # Ensure response_format is serializable
+            if "response_format" in result and result["response_format"] is not None:
+                if not isinstance(result["response_format"], dict):
+                    try:
+                        result["response_format"] = dict(result["response_format"])
+                    except (TypeError, ValueError):
+                        result["response_format"] = {
+                            "response": response_text,
+                            "is_recommendation_format": False
+                        }
+            
+            # Update metadata
+            meta_data = {"language": language, "state": result}
+            await db_execute_async(
+                "UPDATE conversations SET meta_data = $1 WHERE id = $2",
+                (json.dumps(meta_data, cls=DateTimeEncoder), conversation_id)
+            )
+            
+        except Exception as e:
+            logger.error(f"Streaming error: {str(e)}")
+            yield f"[Error: {str(e)}]"
+    
+    return StreamingResponse(
+        stream_response(), 
+        media_type="text/plain",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-cache, no-transform"
+        }
+    )
 
 # @app.post("/tenant/update")
 # async def tenant_update(request: UpdateRequest):
