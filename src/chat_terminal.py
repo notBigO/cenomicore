@@ -83,7 +83,6 @@ class ChatTerminal:
         if not self.mall_id:
             console.print("[yellow]Please select a mall first![/yellow]")
             await self.select_mall()
-        
         try:
             payload = {
                 "text": text,
@@ -91,31 +90,25 @@ class ChatTerminal:
                 "language": self.language,
                 "mall_id": self.mall_id
             }
-            
             if self.user_id:
                 payload["user_id"] = self.user_id
-                
-            response = requests.post(f"{API_URL}/chat", json=payload)
-            
+            response = requests.post(f"{API_URL}/chat", json=payload, stream=True)
             if response.status_code == 200:
-                data = response.json()
-                self.conversation_id = data["conversation_id"]
-                return data["message"]
+                streamed_text = ""
+                for chunk in response.iter_content(chunk_size=1, decode_unicode=True):
+                    if chunk:
+                        streamed_text += chunk
+                        # Optionally, print(chunk, end="", flush=True)  # For live effect
+                return streamed_text.strip()
             else:
-                # Log the error but don't display technical details to the user
                 console.print(f"[red]Error: {response.status_code}[/red]", style="dim")
-                
-                # Only log the response text, don't show it to the user
                 if hasattr(console, "log"):
                     console.log(f"API Error response: {response.text}")
-                
                 return "I'm sorry, I'm having trouble understanding that right now. Could you try rephrasing your question?"
         except Exception as e:
-            # Log the error but don't display it to the user
             console.print(f"[red]Error sending message[/red]", style="dim")
             if hasattr(console, "log"):
                 console.log(f"Exception: {str(e)}")
-            
             return "I apologize, but I'm having technical difficulties right now. Please try again later."
     
     async def start_chat(self):

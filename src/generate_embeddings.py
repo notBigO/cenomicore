@@ -6,6 +6,8 @@ import os
 from decimal import Decimal
 from datetime import date, time, datetime
 import json
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as qdrant_models
 
 # Load environment variables
 load_dotenv()
@@ -40,6 +42,16 @@ index = pc.Index(INDEX_NAME)
 
 # Load multilingual model for embeddings
 model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+
+# Qdrant configuration
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+COLLECTION_NAME = "cenomicore"
+qdrant_client = QdrantClient(url=QDRANT_URL)
+if COLLECTION_NAME not in [c.name for c in qdrant_client.get_collections().collections]:
+    qdrant_client.create_collection(
+        collection_name=COLLECTION_NAME,
+        vectors_config=qdrant_models.VectorParams(size=384, distance=qdrant_models.Distance.COSINE)
+    )
 
 # Function to connect to PostgreSQL and fetch data
 def fetch_data(query, batch_size=100):
@@ -87,12 +99,11 @@ def convert_metadata(metadata):
     return converted
 
 def upsert_embeddings(data, id_prefix, text_field_en, text_field_ar, metadata_fields=None):
-    vectors = []
+    points = []
     for item in data:
         text_en = item[text_field_en] if item[text_field_en] is not None else ""
         text_ar = item[text_field_ar] if item[text_field_ar] is not None else ""
 
-        # If metadata_fields is None, use all fields
         if metadata_fields is None:
             metadata_fields = item.keys()
 
@@ -101,21 +112,32 @@ def upsert_embeddings(data, id_prefix, text_field_en, text_field_ar, metadata_fi
         metadata_en = {k: item[k] for k in metadata_fields if k in item}
         metadata_en.update({"lang": "en", "type": id_prefix})
         metadata_en = convert_metadata(metadata_en)
-        vectors.append({"id": vector_id_en, "values": embedding_en, "metadata": metadata_en})
+        points.append(qdrant_models.PointStruct(
+            id=vector_id_en,
+            vector=embedding_en,
+            payload=metadata_en
+        ))
 
         embedding_ar = model.encode(text_ar).tolist()
         vector_id_ar = f"{id_prefix}_{item['id']}_ar"
         metadata_ar = {k: item[k] for k in metadata_fields if k in item}
         metadata_ar.update({"lang": "ar", "type": id_prefix})
         metadata_ar = convert_metadata(metadata_ar)
-        vectors.append({"id": vector_id_ar, "values": embedding_ar, "metadata": metadata_ar})
+        points.append(qdrant_models.PointStruct(
+            id=vector_id_ar,
+            vector=embedding_ar,
+            payload=metadata_ar
+        ))
 
     batch_size = 100
     try:
-        for i in range(0, len(vectors), batch_size):
-            batch = vectors[i:i + batch_size]
-            index.upsert(vectors=batch)
-        print(f"Upserted {len(vectors)} embeddings for {id_prefix}")
+        for i in range(0, len(points), batch_size):
+            batch = points[i:i + batch_size]
+            qdrant_client.upsert(
+                collection_name=COLLECTION_NAME,
+                points=batch
+            )
+        print(f"Upserted {len(points)} embeddings for {id_prefix}")
     except Exception as e:
         print(f"Error upserting {id_prefix} embeddings: {e}")
 

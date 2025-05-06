@@ -15,17 +15,23 @@ from utils import db_fetch_all_async, db_fetch_one_async, convert_to_json_safe, 
 import networkx as nx
 import spacy
 from langchain_openai import ChatOpenAI
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as qdrant_models
+import time
 
 
 # Load spaCy NLP model for store name and category extraction
 nlp = spacy.load("en_core_web_sm")
 
-# Pinecone setup
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-if not PINECONE_API_KEY:
-    raise ValueError("PINECONE_API_KEY environment variable is not set")
-pc = Pinecone(api_key=PINECONE_API_KEY)
-index = pc.Index("cenomicore")
+# Qdrant setup
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+COLLECTION_NAME = "cenomicore"
+qdrant_client = QdrantClient(url=QDRANT_URL)
+if COLLECTION_NAME not in [c.name for c in qdrant_client.get_collections().collections]:
+    qdrant_client.create_collection(
+        collection_name=COLLECTION_NAME,
+        vectors_config=qdrant_models.VectorParams(size=384, distance=qdrant_models.Distance.COSINE)
+    )
 
 # Embeddings
 embeddings = HuggingFaceEmbeddings(model_name="paraphrase-multilingual-MiniLM-L12-v2")
@@ -251,6 +257,8 @@ customer_prompt = PromptTemplate(
     - Events: Location, timing, any special instructions
     - Services: Location, availability, requirements
     
+    # IMPORTANT: If the context is empty or no results are found, say "Sorry, I couldn't find that information." Do not make up or guess. Only use the provided context.
+    
     # Follow-up Question Control (STRICTLY FOLLOW THIS)
     - If topic_turn_count = 1: Ask ONE follow-up question to refine information
     - If topic_turn_count >= 2: DO NOT ask follow-up questions - respond with finality
@@ -408,35 +416,48 @@ async def retrieve_product_context(state: CustomerState) -> CustomerState:
     # Build query vector focused on products
     product_query_vector = embeddings.embed_query(f"product {product_name if product_name else state.query}")
     
-    # Pinecone query with filter specifically for products
-    filter_dict = {"mall_id": state.mall_id, "type": "product"}
+    # Qdrant query with filter specifically for products
+    qdrant_filter = qdrant_models.Filter(must=[
+        qdrant_models.FieldCondition(key="mall_id", match=qdrant_models.MatchValue(value=state.mall_id)),
+        qdrant_models.FieldCondition(key="type", match=qdrant_models.MatchValue(value="product"))
+    ])
     try:
+        qdrant_start = time.time()
         results = await asyncio.to_thread(
-            index.query, 
-            vector=product_query_vector, 
-            top_k=15,  # Reduced number - more focused 
-            include_metadata=True, 
-            filter=filter_dict
+            qdrant_client.search,
+            collection_name=COLLECTION_NAME,
+            query_vector=product_query_vector,
+            limit=15,
+            with_payload=True,
+            filter=qdrant_filter
         )
-        matches = results.get("matches", [])
-        state.initial_context = [{"id": doc["id"], "score": float(doc["score"]), "metadata": doc["metadata"]} for doc in matches]
+        qdrant_time = time.time() - qdrant_start
+        logger.info(f"Qdrant product search took {qdrant_time:.2f}s")
+        matches = results
+        state.initial_context = [
+            {"id": str(doc.id), "score": float(doc.score), "metadata": doc.payload} for doc in matches
+        ]
         
         # If we don't find products, try searching for stores that might have those products
         if len(matches) < 3 and product_name:
-            store_filter = {"mall_id": state.mall_id, "type": "store"}
+            store_filter = qdrant_models.Filter(must=[
+                qdrant_models.FieldCondition(key="mall_id", match=qdrant_models.MatchValue(value=state.mall_id)),
+                qdrant_models.FieldCondition(key="type", match=qdrant_models.MatchValue(value="store"))
+            ])
             store_results = await asyncio.to_thread(
-                index.query,
-                vector=embeddings.embed_query(f"store selling {product_name}"),
-                top_k=5,
-                include_metadata=True,
+                qdrant_client.search,
+                collection_name=COLLECTION_NAME,
+                query_vector=embeddings.embed_query(f"store selling {product_name}"),
+                limit=5,
+                with_payload=True,
                 filter=store_filter
             )
-            store_matches = store_results.get("matches", [])
+            store_matches = store_results
             for doc in store_matches:
-                state.initial_context.append({"id": doc["id"], "score": float(doc["score"]) * 0.8, "metadata": doc["metadata"]})
+                state.initial_context.append({"id": str(doc.id), "score": float(doc.score) * 0.8, "metadata": doc.payload})
     
     except Exception as e:
-        logger.error(f"Pinecone query error for product context: {e}")
+        logger.error(f"Qdrant query error for product context: {e}")
         state.initial_context = []
     
     # Before returning, process any location codes
@@ -446,32 +467,55 @@ async def retrieve_product_context(state: CustomerState) -> CustomerState:
                 item["metadata"]["location"] = convert_location_codes(item["metadata"]["location"])
     
     REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
+    if not state.initial_context or len(state.initial_context) == 0:
+        state.response = "Sorry, I couldn't find any matching products or stores for your query."
+        return state
     return state
 
 async def retrieve_mall_context(state: CustomerState) -> CustomerState:
     if not state.mall_id:
         state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
         return state
-    
+
     # Specialized query for mall information
     cache_key = f"mall_context:{state.query}:{state.mall_id}"
     cached_context = REDIS_CLIENT.get(cache_key)
     if cached_context:
         state.initial_context = json.loads(cached_context)
         return state
-    
+
     # For mall info, we focus on amenities, directions, hours, and general mall data
     mall_query_vector = embeddings.embed_query(f"mall information {state.query}")
-    
-    # Get mall information directly from database with the correct fields
+
+    # --- PATCH: Add timing to DB fetches and Qdrant searches in retrieve_mall_context ---
+    db_start = time.time()
     mall_info = await db_fetch_one_async(
         """SELECT marketing_name, marketing_name_ar, city, country, mall_information, gps_coordinates
         FROM malls WHERE unique_property_id = $1""",
         (state.mall_id,)
     )
-    
+    db_time = time.time() - db_start
+    logger.info(f"DB fetch (mall_info) took {db_time:.2f}s")
+    # ...
+    qdrant_start = time.time()
+    amenity_results = await asyncio.to_thread(
+        qdrant_client.search,
+        collection_name=COLLECTION_NAME,
+        query_vector=mall_query_vector,
+        limit=10,
+        with_payload=True,
+        filter=qdrant_models.Filter(must=[
+            qdrant_models.FieldCondition(key="mall_id", match=qdrant_models.MatchValue(value=state.mall_id)),
+            qdrant_models.FieldCondition(key="type", match=qdrant_models.MatchValue(value="amenity"))
+        ])
+    )
+    qdrant_time = time.time() - qdrant_start
+    logger.info(f"Qdrant search (amenities) took {qdrant_time:.2f}s")
+    # ...
+    # Repeat this for all DB fetches and Qdrant searches in all context retrieval functions (offer/event, services, family, visit planning, etc).
+
     state.initial_context = []
-    
+
     if mall_info:
         # Extract address information from the mall_information JSON field
         address_en = None
@@ -545,19 +589,23 @@ async def retrieve_mall_context(state: CustomerState) -> CustomerState:
     
     # Also fetch amenities
     try:
-        amenity_filter = {"mall_id": state.mall_id, "type": "amenity"}
+        amenity_filter = qdrant_models.Filter(must=[
+            qdrant_models.FieldCondition(key="mall_id", match=qdrant_models.MatchValue(value=state.mall_id)),
+            qdrant_models.FieldCondition(key="type", match=qdrant_models.MatchValue(value="amenity"))
+        ])
         amenity_results = await asyncio.to_thread(
-            index.query,
-            vector=mall_query_vector,
-            top_k=10,
-            include_metadata=True,
+            qdrant_client.search,
+            collection_name=COLLECTION_NAME,
+            query_vector=mall_query_vector,
+            limit=10,
+            with_payload=True,
             filter=amenity_filter
         )
-        amenity_matches = amenity_results.get("matches", [])
+        amenity_matches = amenity_results
         for doc in amenity_matches:
-            state.initial_context.append({"id": doc["id"], "score": float(doc["score"]), "metadata": doc["metadata"]})
+            state.initial_context.append({"id": str(doc.id), "score": float(doc.score), "metadata": doc.payload})
     except Exception as e:
-        logger.error(f"Pinecone query error for mall context: {e}")
+        logger.error(f"Qdrant query error for mall context: {e}")
     
     # Before returning, process any location codes
     for item in state.initial_context:
@@ -566,6 +614,9 @@ async def retrieve_mall_context(state: CustomerState) -> CustomerState:
                 item["metadata"]["location"] = convert_location_codes(item["metadata"]["location"])
     
     REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
+    if not state.initial_context or len(state.initial_context) == 0:
+        state.response = "Sorry, I couldn't find any information about this mall."
+        return state
     return state
 
 async def retrieve_offer_event_context(state: CustomerState) -> CustomerState:
@@ -584,6 +635,7 @@ async def retrieve_offer_event_context(state: CustomerState) -> CustomerState:
     current_date = datetime.now().isoformat()
     
     # Directly query database for latest offers and events
+    db_start = time.time()
     engagements = await db_fetch_all_async(
         """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
            e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, b.brand_name_en
@@ -594,6 +646,8 @@ async def retrieve_offer_event_context(state: CustomerState) -> CustomerState:
            ORDER BY e.start_date ASC""",
         (state.mall_id, current_date)
     )
+    db_time = time.time() - db_start
+    logger.info(f"DB fetch (engagements) took {db_time:.2f}s")
     
     # Format engagements as initial context
     state.initial_context = []
@@ -634,20 +688,23 @@ async def retrieve_offer_event_context(state: CustomerState) -> CustomerState:
                 item["metadata"]["location"] = convert_location_codes(item["metadata"]["location"])
     
     REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
+    if not state.initial_context or len(state.initial_context) == 0:
+        state.response = "Sorry, I couldn't find any offers or events for your query."
+        return state
     return state
 
 async def retrieve_services_context(state: CustomerState) -> CustomerState:
     if not state.mall_id:
         state.response = "Oops! I need to know which mall you're asking about. Please select a mall first! 😊"
         return state
-    
+
     # Specialized query for services
     cache_key = f"services_context:{state.query}:{state.mall_id}"
     cached_context = REDIS_CLIENT.get(cache_key)
     if cached_context:
         state.initial_context = json.loads(cached_context)
         return state
-    
+
     # Directly query database for services
     services = await db_fetch_all_async(
         """SELECT s.id, s.name, s.description, s.location, s.is_available
@@ -655,8 +712,7 @@ async def retrieve_services_context(state: CustomerState) -> CustomerState:
            WHERE s.unique_property_id = $1""",
         (state.mall_id,)
     )
-    
-    # Format services as initial context
+
     state.initial_context = []
     for service in services:
         metadata = {
@@ -669,34 +725,41 @@ async def retrieve_services_context(state: CustomerState) -> CustomerState:
         }
         state.initial_context.append({
             "id": f"service_{service['id']}",
-            "score": 1.0,  # Direct database lookup
+            "score": 1.0,
             "metadata": metadata
         })
-    
+
     # Also include amenities as they're often related to services
     try:
         service_query_vector = embeddings.embed_query(f"mall service {state.query}")
-        amenity_filter = {"mall_id": state.mall_id, "type": "amenity"}
+        amenity_filter = qdrant_models.Filter(must=[
+            qdrant_models.FieldCondition(key="mall_id", match=qdrant_models.MatchValue(value=state.mall_id)),
+            qdrant_models.FieldCondition(key="type", match=qdrant_models.MatchValue(value="amenity"))
+        ])
         amenity_results = await asyncio.to_thread(
-            index.query,
-            vector=service_query_vector,
-            top_k=5,
-            include_metadata=True,
+            qdrant_client.search,
+            collection_name=COLLECTION_NAME,
+            query_vector=service_query_vector,
+            limit=5,
+            with_payload=True,
             filter=amenity_filter
         )
-        amenity_matches = amenity_results.get("matches", [])
+        amenity_matches = amenity_results
         for doc in amenity_matches:
-            state.initial_context.append({"id": doc["id"], "score": float(doc["score"]), "metadata": doc["metadata"]})
+            state.initial_context.append({"id": str(doc.id), "score": float(doc.score), "metadata": doc.payload})
     except Exception as e:
-        logger.error(f"Pinecone query error for services context: {e}")
-    
+        logger.error(f"Qdrant query error for services context: {e}")
+
     # Before returning, process any location codes
     for item in state.initial_context:
         if "metadata" in item and item["metadata"]:
             if "location" in item["metadata"]:
                 item["metadata"]["location"] = convert_location_codes(item["metadata"]["location"])
-    
+
     REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
+    if not state.initial_context or len(state.initial_context) == 0:
+        state.response = "Sorry, I couldn't find any services or amenities for your query."
+        return state
     return state
 
 async def retrieve_family_planning_context(state: CustomerState) -> CustomerState:
@@ -813,6 +876,7 @@ async def retrieve_family_planning_context(state: CustomerState) -> CustomerStat
     
     # Fetch family-oriented events and offers
     current_date = datetime.now().isoformat()
+    db_start = time.time()
     engagements = await db_fetch_all_async(
         """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
            e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, b.brand_name_en
@@ -822,6 +886,8 @@ async def retrieve_family_planning_context(state: CustomerState) -> CustomerStat
            (e.end_date >= $2 OR e.end_date IS NULL)""",
         (state.mall_id, current_date)
     )
+    db_time = time.time() - db_start
+    logger.info(f"DB fetch (engagements) took {db_time:.2f}s")
     
     for engagement in engagements:
         title = engagement.get("title_en", "").lower()
@@ -900,6 +966,9 @@ async def retrieve_family_planning_context(state: CustomerState) -> CustomerStat
     
     # Cache the results
     REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
+    if not state.initial_context or len(state.initial_context) == 0:
+        state.response = "Sorry, I couldn't find any family or kid-friendly options for your query."
+        return state
     return state
 
 async def retrieve_visit_planning_context(state: CustomerState) -> CustomerState:
@@ -1000,6 +1069,7 @@ async def retrieve_visit_planning_context(state: CustomerState) -> CustomerState
     current_date = datetime.now().isoformat()
     
     # Fetch current events
+    db_start = time.time()
     events = await db_fetch_all_async(
         """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
            e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, b.brand_name_en
@@ -1012,6 +1082,8 @@ async def retrieve_visit_planning_context(state: CustomerState) -> CustomerState
            LIMIT 5""",
         (state.mall_id, current_date)
     )
+    db_time = time.time() - db_start
+    logger.info(f"DB fetch (events) took {db_time:.2f}s")
     
     for event in events:
         metadata = {
@@ -1032,6 +1104,7 @@ async def retrieve_visit_planning_context(state: CustomerState) -> CustomerState
         })
     
     # Fetch exclusive or highlighted offers
+    db_start = time.time()
     offers = await db_fetch_all_async(
         """SELECT e.engagement_id, e.title_en, e.description_en, e.type, e.brand_id, 
            e.start_date, e.end_date, e.terms_conditions_en, e.is_exclusive, b.brand_name_en
@@ -1045,6 +1118,8 @@ async def retrieve_visit_planning_context(state: CustomerState) -> CustomerState
            LIMIT 5""",
         (state.mall_id, current_date)
     )
+    db_time = time.time() - db_start
+    logger.info(f"DB fetch (offers) took {db_time:.2f}s")
     
     for offer in offers:
         metadata = {
@@ -1066,6 +1141,7 @@ async def retrieve_visit_planning_context(state: CustomerState) -> CustomerState
         })
     
     # Fetch popular dining options
+    db_start = time.time()
     restaurants = await db_fetch_all_async(
         """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
            b.pms_unit_codes
@@ -1079,6 +1155,8 @@ async def retrieve_visit_planning_context(state: CustomerState) -> CustomerState
            LIMIT 5""", 
         (state.mall_id,)
     )
+    db_time = time.time() - db_start
+    logger.info(f"DB fetch (restaurants) took {db_time:.2f}s")
     
     for restaurant in restaurants:
         metadata = {
@@ -1097,6 +1175,7 @@ async def retrieve_visit_planning_context(state: CustomerState) -> CustomerState
         })
     
     # Fetch popular shopping stores
+    db_start = time.time()
     stores = await db_fetch_all_async(
         """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
            b.pms_unit_codes
@@ -1110,6 +1189,8 @@ async def retrieve_visit_planning_context(state: CustomerState) -> CustomerState
            LIMIT 5""", 
         (state.mall_id,)
     )
+    db_time = time.time() - db_start
+    logger.info(f"DB fetch (stores) took {db_time:.2f}s")
     
     for store in stores:
         metadata = {
@@ -1128,6 +1209,7 @@ async def retrieve_visit_planning_context(state: CustomerState) -> CustomerState
         })
     
     # Fetch entertainment options
+    db_start = time.time()
     entertainment = await db_fetch_all_async(
         """SELECT b.brand_id, b.brand_name_en, b.category_name, b.description_en, 
            b.pms_unit_codes
@@ -1143,6 +1225,8 @@ async def retrieve_visit_planning_context(state: CustomerState) -> CustomerState
            LIMIT 3""", 
         (state.mall_id,)
     )
+    db_time = time.time() - db_start
+    logger.info(f"DB fetch (entertainment) took {db_time:.2f}s")
     
     for venue in entertainment:
         metadata = {
@@ -1169,6 +1253,9 @@ async def retrieve_visit_planning_context(state: CustomerState) -> CustomerState
     
     # Cache the results
     REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
+    if not state.initial_context or len(state.initial_context) == 0:
+        state.response = "Sorry, I couldn't find any visit planning suggestions for your query."
+        return state
     return state
 
 async def retrieve_fallback_context(state: CustomerState) -> CustomerState:
@@ -1734,6 +1821,7 @@ async def generate_response(state: CustomerState) -> CustomerState:
     logger.info(f"CONVERSATION STATE: Topic: {state.conversation_topic}, Turn count: {state.topic_turn_count}, Intent: {state.intent}, Query type: {state.query_type}")
     
     try:
+        llm_start = time.time()
         response = await asyncio.to_thread(
             customer_chain.invoke,
             {
@@ -1747,6 +1835,8 @@ async def generate_response(state: CustomerState) -> CustomerState:
                 "conversation_topic": state.conversation_topic
             }
         )
+        llm_time = time.time() - llm_start
+        logger.info(f"LLM response took {llm_time:.2f}s")
         
         # Check if this is a product listing, store listing, or offer listing
         # If so, format the response as recommendations
@@ -1899,7 +1989,7 @@ async def initial_retrieval(state: CustomerState) -> CustomerState:
     else:
         query_vectors = [embeddings.embed_query(f"{query_prefix} {item}") for item in query_items]
 
-    avg_vector = [sum(v[i] for v in query_vectors) / len(query_vectors) for i in range(len(query_vectors[0]))]
+    avg_vector = [sum(v[i] for v in query_vectors) / len(query_vectors[0]) for i in range(len(query_vectors[0]))]
 
     # Enhance with history
     if state.conversation_history and any(word in state.query.lower() for word in ["they", "it", "that", "this", "there", "those"]):
@@ -1908,22 +1998,26 @@ async def initial_retrieval(state: CustomerState) -> CustomerState:
             history_vector = embeddings.embed_query(last_response)
             avg_vector = [(a + h) / 2 for a, h in zip(avg_vector, history_vector)]
 
-    # Pinecone query
-    filter_dict = {"mall_id": state.mall_id}
+    # Qdrant query
+    qdrant_filter = qdrant_models.Filter(must=[
+        qdrant_models.FieldCondition(key="mall_id", match=qdrant_models.MatchValue(value=state.mall_id))
+    ])
     try:
         results = await asyncio.to_thread(
-            index.query, 
-            vector=avg_vector, 
-            top_k=25, 
-            include_metadata=True, 
-            filter=filter_dict
+            qdrant_client.search,
+            collection_name=COLLECTION_NAME,
+            query_vector=avg_vector,
+            limit=25,
+            with_payload=True,
+            filter=qdrant_filter
         )
-        matches = results.get("matches", [])
-        state.initial_context = [{"id": doc["id"], "score": float(doc["score"]), "metadata": doc["metadata"]} for doc in matches]
+        matches = results
+        state.initial_context = [
+            {"id": str(doc.id), "score": float(doc.score), "metadata": doc.payload} for doc in matches
+        ]
     except Exception as e:
-        logger.error(f"Pinecone query error: {e}")
+        logger.error(f"Qdrant query error: {e}")
         state.initial_context = []
-    
     # Process any location codes before returning
     if state.initial_context:
         for item in state.initial_context:
@@ -1933,7 +2027,7 @@ async def initial_retrieval(state: CustomerState) -> CustomerState:
                     item["metadata"]["location"] = convert_location_codes(item["metadata"]["pms_unit_codes"])
                 elif "location" in item["metadata"]:
                     item["metadata"]["location"] = convert_location_codes(item["metadata"]["location"])
-    
+
     REDIS_CLIENT.set(cache_key, json.dumps(state.initial_context, cls=DateTimeEncoder), ex=300)
     return state
 

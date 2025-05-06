@@ -10,11 +10,18 @@ import os
 from pinecone import Pinecone
 from langchain_huggingface import HuggingFaceEmbeddings
 from utils import db_fetch_one_async, db_fetch_all_async, db_execute_async, REDIS_CLIENT, logger, get_conversation_history
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as qdrant_models
 
-# Pinecone setup
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-pc = Pinecone(api_key=PINECONE_API_KEY)
-index = pc.Index("cenomicore")
+# Qdrant setup
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+COLLECTION_NAME = "cenomicore"
+qdrant_client = QdrantClient(url=QDRANT_URL)
+if COLLECTION_NAME not in [c.name for c in qdrant_client.get_collections().collections]:
+    qdrant_client.create_collection(
+        collection_name=COLLECTION_NAME,
+        vectors_config=qdrant_models.VectorParams(size=384, distance=qdrant_models.Distance.COSINE)
+    )
 
 # Embeddings
 embeddings = HuggingFaceEmbeddings(model_name='paraphrase-multilingual-MiniLM-L12-v2')
@@ -412,19 +419,24 @@ async def execute_operation(state: TenantState) -> None:
             if offer:
                 offer_id = offer["offer_id"]
                 vector = embeddings.embed_query(description)
-                index.upsert(vectors=[{
-                    "id": f"offer_{offer_id}_en",
-                    "values": vector,
-                    "metadata": {
-                        "type": "offer",
-                        "id": offer_id,
-                        "description_en": description,
-                        "store_id": store_id,
-                        "store_name": store_name,
-                        "location_en": location_en,
-                        "lang": "en"
-                    }
-                }])
+                qdrant_client.upsert(
+                    collection_name=COLLECTION_NAME,
+                    points=[
+                        qdrant_models.PointStruct(
+                            id=f"offer_{offer_id}_en",
+                            vector=vector,
+                            payload={
+                                "type": "offer",
+                                "id": offer_id,
+                                "description_en": description,
+                                "store_id": store_id,
+                                "store_name": store_name,
+                                "location_en": location_en,
+                                "lang": "en"
+                            }
+                        )
+                    ]
+                )
                 REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Added '{description}' to {state.store_name} from {start_date} to {end_date}. Anything else? 😊"
             else:
@@ -448,19 +460,24 @@ async def execute_operation(state: TenantState) -> None:
                     (new_desc, new_desc, offer_id)
                 )
                 vector = embeddings.embed_query(new_desc)
-                index.upsert(vectors=[{
-                    "id": f"offer_{offer_id}_en",
-                    "values": vector,
-                    "metadata": {
-                        "type": "offer",
-                        "id": offer_id,
-                        "description_en": new_desc,
-                        "store_id": store_id,
-                        "store_name": store_name,
-                        "location_en": location_en,
-                        "lang": "en"
-                    }
-                }])
+                qdrant_client.upsert(
+                    collection_name=COLLECTION_NAME,
+                    points=[
+                        qdrant_models.PointStruct(
+                            id=f"offer_{offer_id}_en",
+                            vector=vector,
+                            payload={
+                                "type": "offer",
+                                "id": offer_id,
+                                "description_en": new_desc,
+                                "store_id": store_id,
+                                "store_name": store_name,
+                                "location_en": location_en,
+                                "lang": "en"
+                            }
+                        )
+                    ]
+                )
                 REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Updated '{old_desc}' to '{new_desc}' in {state.store_name}. Anything else? 😊"
             elif update_field == "2":
@@ -488,7 +505,10 @@ async def execute_operation(state: TenantState) -> None:
             if offer:
                 offer_id = offer["offer_id"]
                 await db_execute_async("DELETE FROM offers WHERE offer_id = $1", (offer_id,))
-                index.delete(ids=[f"offer_{offer_id}_en"])
+                qdrant_client.delete(
+                    collection_name=COLLECTION_NAME,
+                    points_selector=qdrant_models.PointIdsList(points=[f"offer_{offer_id}_en"])
+                )
                 REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Removed '{description}' from {state.store_name}. Anything else? 😊"
             else:
@@ -511,23 +531,28 @@ async def execute_operation(state: TenantState) -> None:
             if product:
                 product_id = product["product_id"]
                 vector = embeddings.embed_query(f"{name} {description or ''}")
-                index.upsert(vectors=[{
-                    "id": f"product_{product_id}_en",
-                    "values": vector,
-                    "metadata": {
-                        "type": "product",
-                        "id": product_id,
-                        "mall_id": store["mall_id"],
-                        "name_en": name,
-                        "description_en": description or "",
-                        "price": price,
-                        "currency": currency,
-                        "store_id": store_id,
-                        "store_name": store_name,
-                        "location_en": location_en,
-                        "lang": "en"
-                    }
-                }])
+                qdrant_client.upsert(
+                    collection_name=COLLECTION_NAME,
+                    points=[
+                        qdrant_models.PointStruct(
+                            id=f"product_{product_id}_en",
+                            vector=vector,
+                            payload={
+                                "type": "product",
+                                "id": product_id,
+                                "mall_id": store["mall_id"],
+                                "name_en": name,
+                                "description_en": description or "",
+                                "price": price,
+                                "currency": currency,
+                                "store_id": store_id,
+                                "store_name": store_name,
+                                "location_en": location_en,
+                                "lang": "en"
+                            }
+                        )
+                    ]
+                )
                 REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Added '{name}' ({description or 'No description'}) to {state.store_name} for {price} {currency}. Anything else? 😊"
             else:
@@ -550,23 +575,28 @@ async def execute_operation(state: TenantState) -> None:
                     (new_name, new_name, product_id)
                 )
                 vector = embeddings.embed_query(f"{new_name} {state.collected_data.get('description', '')}")
-                index.upsert(vectors=[{
-                    "id": f"product_{product_id}_en",
-                    "values": vector,
-                    "metadata": {
-                        "type": "product",
-                        "id": product_id,
-                        "mall_id": store["mall_id"],
-                        "name_en": new_name,
-                        "description_en": state.collected_data.get("description", ""),
-                        "price": float(state.collected_data.get("price", 0)),
-                        "currency": state.collected_data.get("currency", ""),
-                        "store_id": store_id,
-                        "store_name": store_name,
-                        "location_en": location_en,
-                        "lang": "en"
-                    }
-                }])
+                qdrant_client.upsert(
+                    collection_name=COLLECTION_NAME,
+                    points=[
+                        qdrant_models.PointStruct(
+                            id=f"product_{product_id}_en",
+                            vector=vector,
+                            payload={
+                                "type": "product",
+                                "id": product_id,
+                                "mall_id": store["mall_id"],
+                                "name_en": new_name,
+                                "description_en": state.collected_data.get("description", ""),
+                                "price": float(state.collected_data.get("price", 0)),
+                                "currency": state.collected_data.get("currency", ""),
+                                "store_id": store_id,
+                                "store_name": store_name,
+                                "location_en": location_en,
+                                "lang": "en"
+                            }
+                        )
+                    ]
+                )
                 REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Updated '{old_name}' to '{new_name}' in {state.store_name}. Anything else? 😊"
             elif update_field == "2":
@@ -576,22 +606,27 @@ async def execute_operation(state: TenantState) -> None:
                     (new_desc, new_desc, product_id)
                 )
                 vector = embeddings.embed_query(f"{old_name} {new_desc}")
-                index.upsert(vectors=[{
-                    "id": f"product_{product_id}_en",
-                    "values": vector,
-                    "metadata": {
-                        "type": "product",
-                        "id": product_id,
-                        "name_en": old_name,
-                        "description_en": new_desc,
-                        "price": float(state.collected_data.get("price", 0)),
-                        "currency": state.collected_data.get("currency", ""),
-                        "store_id": store_id,
-                        "store_name": store_name,
-                        "location_en": location_en,
-                        "lang": "en"
-                    }
-                }])
+                qdrant_client.upsert(
+                    collection_name=COLLECTION_NAME,
+                    points=[
+                        qdrant_models.PointStruct(
+                            id=f"product_{product_id}_en",
+                            vector=vector,
+                            payload={
+                                "type": "product",
+                                "id": product_id,
+                                "name_en": old_name,
+                                "description_en": new_desc,
+                                "price": float(state.collected_data.get("price", 0)),
+                                "currency": state.collected_data.get("currency", ""),
+                                "store_id": store_id,
+                                "store_name": store_name,
+                                "location_en": location_en,
+                                "lang": "en"
+                            }
+                        )
+                    ]
+                )
                 REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Updated '{old_name}' description to '{new_desc}' in {state.store_name}. Anything else? 😊"
             elif update_field == "3":
@@ -601,22 +636,27 @@ async def execute_operation(state: TenantState) -> None:
                     (new_price, product_id)
                 )
                 vector = embeddings.embed_query(f"{old_name} {state.collected_data.get('description', '')}")
-                index.upsert(vectors=[{
-                    "id": f"product_{product_id}_en",
-                    "values": vector,
-                    "metadata": {
-                        "type": "product",
-                        "id": product_id,
-                        "name_en": old_name,
-                        "description_en": state.collected_data.get("description", ""),
-                        "price": new_price,
-                        "currency": state.collected_data.get("currency", ""),
-                        "store_id": store_id,
-                        "store_name": store_name,
-                        "location_en": location_en,
-                        "lang": "en"
-                    }
-                }])
+                qdrant_client.upsert(
+                    collection_name=COLLECTION_NAME,
+                    points=[
+                        qdrant_models.PointStruct(
+                            id=f"product_{product_id}_en",
+                            vector=vector,
+                            payload={
+                                "type": "product",
+                                "id": product_id,
+                                "name_en": old_name,
+                                "description_en": state.collected_data.get("description", ""),
+                                "price": new_price,
+                                "currency": state.collected_data.get("currency", ""),
+                                "store_id": store_id,
+                                "store_name": store_name,
+                                "location_en": location_en,
+                                "lang": "en"
+                            }
+                        )
+                    ]
+                )
                 REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Updated '{old_name}' price to {new_price} in {state.store_name}. Anything else? 😊"
             elif update_field == "4":
@@ -626,22 +666,27 @@ async def execute_operation(state: TenantState) -> None:
                     (new_currency, product_id)
                 )
                 vector = embeddings.embed_query(f"{old_name} {state.collected_data.get('description', '')}")
-                index.upsert(vectors=[{
-                    "id": f"product_{product_id}_en",
-                    "values": vector,
-                    "metadata": {
-                        "type": "product",
-                        "id": product_id,
-                        "name_en": old_name,
-                        "description_en": state.collected_data.get("description", ""),
-                        "price": float(state.collected_data.get("price", 0)),
-                        "currency": new_currency,
-                        "store_id": store_id,
-                        "store_name": store_name,
-                        "location_en": location_en,
-                        "lang": "en"
-                    }
-                }])
+                qdrant_client.upsert(
+                    collection_name=COLLECTION_NAME,
+                    points=[
+                        qdrant_models.PointStruct(
+                            id=f"product_{product_id}_en",
+                            vector=vector,
+                            payload={
+                                "type": "product",
+                                "id": product_id,
+                                "name_en": old_name,
+                                "description_en": state.collected_data.get("description", ""),
+                                "price": float(state.collected_data.get("price", 0)),
+                                "currency": new_currency,
+                                "store_id": store_id,
+                                "store_name": store_name,
+                                "location_en": location_en,
+                                "lang": "en"
+                            }
+                        )
+                    ]
+                )
                 REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Updated '{old_name}' currency to {new_currency} in {state.store_name}. Anything else? 😊"
         elif state.action == "delete":
@@ -653,7 +698,10 @@ async def execute_operation(state: TenantState) -> None:
             if product:
                 product_id = product["product_id"]
                 await db_execute_async("DELETE FROM products WHERE product_id = $1", (product_id,))
-                index.delete(ids=[f"product_{product_id}_en"])
+                qdrant_client.delete(
+                    collection_name=COLLECTION_NAME,
+                    points_selector=qdrant_models.PointIdsList(points=[f"product_{product_id}_en"])
+                )
                 REDIS_CLIENT.delete(f"context:*:{store_id}")
                 state.response = f"Removed '{name}' from {state.store_name}. Anything else? 😊"
             else:
