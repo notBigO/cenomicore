@@ -527,3 +527,38 @@ async def get_malls():
     
     return result
 
+# Custom Swagger UI with selected endpoints only
+from fastapi.responses import HTMLResponse
+
+@app.get(
+    "/docs",
+    include_in_schema=False,
+    response_class=HTMLResponse  # Change this to HTMLResponse
+)
+async def custom_swagger_ui_html():
+    return get_swagger_ui_html(openapi_url="/openapi.json", title="Swagger UI")
+
+
+@app.get("/openapi.json", include_in_schema=False)
+async def get_open_api_endpoint():
+    # Create a custom OpenAPI schema that only includes certain endpoints
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+        openapi_version="3.0.2"  # Explicitly set a valid OpenAPI version
+    )
+    
+    # Filter to only include the paths we want
+    paths_to_keep = ["/chat", "/malls", "/tts"]
+    filtered_paths = {path: details for path, details in openapi_schema["paths"].items() 
+                     if path in paths_to_keep}
+    
+    openapi_schema["paths"] = filtered_paths
+    
+    # Make sure the openapi version is properly set in the schema
+    if "openapi" not in openapi_schema:
+        openapi_schema["openapi"] = "3.0.0"
+    
+    return JSONResponse(openapi_schema)
