@@ -1,9 +1,11 @@
 import asyncio
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel
 import json
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 import base64
 import requests
 from utils import (
@@ -26,7 +28,15 @@ from io import BytesIO
 import functools
 import concurrent.futures
 
-app = FastAPI()
+# Create FastAPI app with custom documentation settings
+app = FastAPI(
+    title="Cenomi AI API",
+    description="API for Cenomi AI Chatbot with enhanced conversational capabilities",
+    version="1.0.0",
+    docs_url=None,  # Disable automatic docs
+    redoc_url=None  # Disable ReDoc
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -63,6 +73,17 @@ class ChatRequest(BaseModel):
     conversation_id: Optional[str] = None
     mall_id: Optional[int] = None
     include_tts: bool = False
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "text": "Where is the food court?",
+                "user_id": "c_12345",
+                "language": "en",
+                "mall_id": 1,
+                "include_tts": True
+            }
+        }
 
 class ChatResponse(BaseModel):
     message: str
@@ -71,6 +92,17 @@ class ChatResponse(BaseModel):
     recommendations: Optional[List[Dict[str, str]]] = None
     is_recommendation_format: bool = False
     follow_up_question: Optional[str] = None
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "message": "The food court is located on the second floor, near the central atrium.",
+                "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+                "recommendations": [{"title": "View Food Court Map", "url": "/map/food-court"}],
+                "is_recommendation_format": True,
+                "follow_up_question": "Would you like to know what restaurants are available there?"
+            }
+        }
 
 class UpdateRequest(BaseModel):
     text: str
@@ -86,6 +118,39 @@ class TTSRequest(BaseModel):
     text: str
     language: str = "en"
     speed: Optional[float] = None  # Optional speed parameter (0.7 to 1.2)
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "text": "Welcome to Cenomi Mall. How can I assist you today?",
+                "language": "en",
+                "speed": 1.0
+            }
+        }
+
+class TTSResponse(BaseModel):
+    audio_base64: str
+    media_type: str = "audio/mpeg"
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "audio_base64": "base64_encoded_audio_data...",
+                "media_type": "audio/mpeg"
+            }
+        }
+
+class MallInfo(BaseModel):
+    mall_id: str
+    name_en: str
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "mall_id": "1",
+                "name_en": "Cenomi Mall Riyadh"
+            }
+        }
 
 # Cache TTS responses with in-memory fast cache before Redis
 TTS_CACHE = {}
@@ -183,7 +248,9 @@ async def generate_speech(text: str, language: str = "en", speed: Optional[float
         logger.error(f"TTS generation failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"TTS generation failed: {str(e)}")
 
-@app.post("/tts")
+@app.post("/tts", response_model=TTSResponse, tags=["Text-to-Speech"], 
+          summary="Convert text to speech",
+          description="Converts the provided text to speech audio using ElevenLabs API. Supports English and Arabic languages.")
 async def tts(request: TTSRequest):
     try:
         # Validate speed if provided
@@ -197,24 +264,6 @@ async def tts(request: TTSRequest):
     except Exception as e:
         logger.error(f"TTS error: {e}")
         raise HTTPException(status_code=500, detail=f"TTS failed: {str(e)}")
-
-@app.post("/login")
-async def login(request: LoginRequest):
-    tenant = await db_fetch_one_async(
-        "SELECT tenant_id FROM tenants WHERE email ILIKE $1 AND password = $2",
-        (request.email, request.password)
-    )
-    if tenant:
-        return {"user_id": f"t_{tenant['tenant_id']}"}
-    
-    customer = await db_fetch_one_async(
-        "SELECT customer_id FROM customers WHERE email ILIKE $1 AND password = $2",
-        (request.email, request.password)
-    )
-    if customer:
-        return {"user_id": f"c_{customer['customer_id']}"}
-    
-    raise HTTPException(status_code=401, detail="Invalid credentials")
 
 async def create_conversation(user_id: Optional[str], language: str) -> str:
     conversation_id = str(uuid.uuid4())
@@ -277,7 +326,9 @@ async def get_history(conversation_id: str, max_messages: int = 20) -> List[Dict
     
     return history
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/chat", response_model=ChatResponse, tags=["Chat"], 
+          summary="Process a chat message",
+          description="Processes a user's chat message and returns an AI-generated response. Supports multiple languages and optional text-to-speech.")
 async def chat(request: ChatRequest):
     try:
         text = request.text or ""
@@ -447,90 +498,13 @@ async def chat(request: ChatRequest):
         
         return ChatResponse(**response_data)
 
-@app.post("/tenant/update")
-async def tenant_update(request: UpdateRequest):
-    logger.info(f"Received tenant update request: {request.text}, user_id: {request.user_id}")
-    
-    if not request.user_id.startswith("t_"):
-        logger.error("Non-tenant user attempted update")
-        raise HTTPException(status_code=403, detail="Only tenants can perform updates")
-    
-    tenant_id = int(request.user_id[2:])
-    tenant = await db_fetch_one_async(
-        "SELECT tenant_id FROM tenants WHERE tenant_id = $1",
-        (tenant_id,)
-    )
-    if not tenant:
-        logger.error(f"Invalid tenant ID: {tenant_id}")
-        raise HTTPException(status_code=403, detail="Invalid tenant ID")
-    
-    lang = request.language or "en"
-    conversation_id = await get_or_create_conversation(request.conversation_id, request.user_id, lang)
-    history = await get_history(conversation_id)
-    
-    conv_state = await db_fetch_one_async(
-        "SELECT meta_data FROM conversations WHERE id = $1",
-        (conversation_id,)
-    )
-    state_dict = {}
-    if conv_state and conv_state.get("meta_data"):
-        try:
-            meta_data = json.loads(conv_state["meta_data"])
-            if "state" in meta_data:
-                state_dict = meta_data["state"]
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.error(f"Invalid meta_data for conversation {conversation_id}: {e}")
-    
-    if state_dict:
-        try:
-            state = TenantState(**state_dict)
-            state.query = request.text
-            state.conversation_history = history
-        except (json.JSONDecodeError, ValueError):
-            logger.error(f"Invalid state data for conversation {conversation_id}, resetting to new state")
-            state = TenantState(
-                query=request.text,
-                user_id=request.user_id,
-                language=lang,
-                conversation_id=conversation_id,
-                conversation_history=history
-            )
-    else:
-        state = TenantState(
-            query=request.text,
-            user_id=request.user_id,
-            language=lang,
-            conversation_id=conversation_id,
-            conversation_history=history
-        )
-
-    logger.info(f"Invoking tenant graph with query: {request.text}")
-    with trace(name="TenantUpdate", inputs={"query": request.text, "user_id": request.user_id}):
-        result = await tenant_graph.ainvoke(state)
-    
-    meta_data = {"language": lang, "state": result}
-    meta_data_json = json.dumps(meta_data, cls=DateTimeEncoder)
-    
-    # Perform these operations concurrently
-    tasks = [
-        db_execute_async(
-            "UPDATE conversations SET meta_data = $1 WHERE id = $2",
-            (meta_data_json, conversation_id)
-        ),
-        add_message(conversation_id, "user", request.text),
-        add_message(conversation_id, "assistant", result["response"]),
-    ]
-    await asyncio.gather(*tasks)
-
-    await asyncio.to_thread(REDIS_CLIENT.delete, f"history:{conversation_id}")
-    
-    return {"message": result["response"], "conversation_id": conversation_id}
-
 @app.get("/")
 async def root():
     return {"message": "Cenomi Chatbot with Gemini is up and running!"}
 
-@app.get("/malls")
+@app.get("/malls", response_model=List[MallInfo], tags=["Malls"],
+         summary="Get list of malls",
+         description="Returns a list of all available malls with their IDs and names.")
 async def get_malls():
     # Use memory cache first
     mem_cached = get_memory_cache("malls:list")
@@ -552,3 +526,39 @@ async def get_malls():
     set_memory_cache("malls:list", result, ttl=LONG_CACHE_TTL)  # Cache in memory for 1 hour
     
     return result
+
+# Custom Swagger UI with selected endpoints only
+from fastapi.responses import HTMLResponse
+
+@app.get(
+    "/docs",
+    include_in_schema=False,
+    response_class=HTMLResponse  # Change this to HTMLResponse
+)
+async def custom_swagger_ui_html():
+    return get_swagger_ui_html(openapi_url="/openapi.json", title="Swagger UI")
+
+
+@app.get("/openapi.json", include_in_schema=False)
+async def get_open_api_endpoint():
+    # Create a custom OpenAPI schema that only includes certain endpoints
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+        openapi_version="3.0.2"  # Explicitly set a valid OpenAPI version
+    )
+    
+    # Filter to only include the paths we want
+    paths_to_keep = ["/chat", "/malls", "/tts"]
+    filtered_paths = {path: details for path, details in openapi_schema["paths"].items() 
+                     if path in paths_to_keep}
+    
+    openapi_schema["paths"] = filtered_paths
+    
+    # Make sure the openapi version is properly set in the schema
+    if "openapi" not in openapi_schema:
+        openapi_schema["openapi"] = "3.0.0"
+    
+    return JSONResponse(openapi_schema)
