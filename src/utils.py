@@ -31,8 +31,18 @@ DB_CONFIG_ASYNC = {
     "port": int(os.getenv("DB_PORT", "5432"))  # Convert port to int
 }
 
+# Redis configuration
+REDIS_CONFIG = {
+    "host": os.getenv("REDIS_HOST", "localhost"),
+    "port": int(os.getenv("REDIS_PORT", "6379")),
+    "db": int(os.getenv("REDIS_DB", "0")),
+    "password": os.getenv("REDIS_PASSWORD", None),
+    "decode_responses": True,
+    "max_connections": int(os.getenv("REDIS_MAX_CONNECTIONS", "10"))
+}
+
 # Redis setup with connection pooling
-REDIS_POOL = redis.ConnectionPool(host='localhost', port=6379, db=0, decode_responses=True, max_connections=10)
+REDIS_POOL = redis.ConnectionPool(**REDIS_CONFIG)
 def get_redis_client():
     return redis.Redis(connection_pool=REDIS_POOL)
 
