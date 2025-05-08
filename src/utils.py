@@ -10,6 +10,7 @@ from langdetect import detect
 from dotenv import load_dotenv
 import redis
 import asyncpg
+import ssl
 from asyncpg.pool import Pool
 import uuid
 import functools
@@ -22,14 +23,38 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-# Database configuration
+# Database configuration of NEON DB
+# DB_CONFIG_ASYNC = {
+#     "database": os.getenv("DB_NAME", "cenomi_db"),
+#     "user": os.getenv("DB_USER", "postgres"),
+#     "password": os.getenv("DB_PASSWORD", "your_password"),
+#     "host": os.getenv("DB_HOST", "localhost"),
+#     "port": int(os.getenv("DB_PORT", "5432"))  # Convert port to int
+# }
+
+ssl_context = ssl.create_default_context()
+ssl_context.check_hostname = False
+ssl_context.verify_mode = ssl.CERT_NONE
+
+# Database configuration of Supabase DB
 DB_CONFIG_ASYNC = {
-    "database": os.getenv("DB_NAME", "cenomi_db"),
-    "user": os.getenv("DB_USER", "postgres"),
-    "password": os.getenv("DB_PASSWORD", "your_password"),
-    "host": os.getenv("DB_HOST", "localhost"),
-    "port": int(os.getenv("DB_PORT", "5432"))  # Convert port to int
+    "database": os.getenv("SUPABASE_DB_NAME", "postgres"),
+    "user": os.getenv("SUPABASE_USER", "postgres"),
+    "password": os.getenv("SUPABASE_PASSWORD", "your_password"),
+    "host": os.getenv("SUPABASE_HOST", "localhost"),
+    "port": int(os.getenv("SUPABASE_PORT", "6543")),
+    "ssl": ssl_context,
+    "statement_cache_size": 0
 }
+
+# DB_CONFIG_ASYNC = {
+#     "user": "postgres.pedldnktyymxhmmvlkyx",
+#     "password": "1234password",
+#     "database": "postgres",
+#     "host": "aws-0-ap-southeast-1.pooler.supabase.com",
+#     "port": 6543,
+#     "ssl": ssl_context
+# }
 
 # Redis configuration
 REDIS_CONFIG = {
