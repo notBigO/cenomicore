@@ -46,7 +46,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY environment variable is not set")
 
-llm = ChatOpenAI(model="gpt-4o-mini", api_key=OPENAI_API_KEY)
+# Configure ChatOpenAI with streaming=True for streaming support
+llm = ChatOpenAI(model="gpt-4o-mini", api_key=OPENAI_API_KEY, streaming=True)
 
 # Knowledge graph for relationships
 knowledge_graph = nx.Graph()
@@ -2024,44 +2025,35 @@ async def generate_response(state: CustomerState) -> CustomerState:
     # Track conversation topic for multi-turn handling
     current_topic = state.query_type or ""
     if state.intent:
-        current_topic += "_" + state.intent
+        current_topic = f"{current_topic}_{state.intent}" if current_topic else state.intent
 
-    # If we have a resolved entity, add it to the topic for better tracking
-    if resolved_entity:
-        current_topic += "_" + resolved_entity.lower().replace(" ", "_")
-
-    # Check if this is continuing the same conversation topic
-    if (
-        state.conversation_topic
-        and current_topic
-        and state.conversation_topic in current_topic
-    ):
-        # Still on the same general topic
-        state.topic_turn_count += 1
-    else:
-        # New topic
+    # Check if this is a new topic or continuing
+    if state.conversation_topic != current_topic:
         state.conversation_topic = current_topic
         state.topic_turn_count = 1
+    else:
+        state.topic_turn_count += 1
 
-    # Log conversation state for debugging
     logger.info(
         f"CONVERSATION STATE: Topic: {state.conversation_topic}, Turn count: {state.topic_turn_count}, Intent: {state.intent}, Query type: {state.query_type}"
     )
 
     try:
-        response = await asyncio.to_thread(
-            customer_chain.invoke,
-            {
-                "context": state.response,
-                "query": state.query,
-                "lang": state.language,
-                "conversation_history": formatted_history,
-                "mall_name": mall_name,
-                "resolved_entity": resolved_entity,
-                "topic_turn_count": state.topic_turn_count,
-                "conversation_topic": state.conversation_topic,
-            },
-        )
+        # Use the customer_chain with the streaming LLM
+        # The LLM is already configured with streaming=True
+        inputs = {
+            "context": state.response,
+            "query": state.query,
+            "lang": state.language,
+            "conversation_history": formatted_history,
+            "mall_name": mall_name,
+            "resolved_entity": resolved_entity,
+            "topic_turn_count": state.topic_turn_count,
+            "conversation_topic": state.conversation_topic,
+        }
+        
+        # Use the chain which will invoke the streaming LLM
+        response = await customer_chain.ainvoke(inputs)
 
         # Check if this is a product listing, store listing, or offer listing
         # If so, format the response as recommendations

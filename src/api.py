@@ -34,7 +34,7 @@ from src.utils import (
     set_memory_cache,
     strip_markdown,
 )
-from src.customer import CustomerState, customer_graph
+from src.customer import CustomerState, customer_graph, customer_prompt, classify_query_type, classify_intent, refine_context
 
 # from src.tenant import TenantState, tenant_graph
 from typing import Optional, List, Dict, Any
@@ -608,6 +608,227 @@ async def chat(request: ChatRequest, token_payload: dict = Depends(verify_token)
         logger.error(f"CHAT ERROR DETAILS: {str(e)}")
 
         return ChatResponse(**response_data)
+
+
+@app.post(
+    "/chat/stream",
+    tags=["Chat"],
+    summary="Stream a chat response",
+    description="Processes a user's chat message and streams the AI-generated response directly from OpenAI as it's being generated.",
+)
+async def stream_chat(request: ChatRequest, token_payload: dict = Depends(verify_token)):
+    try:
+        text = request.text or ""
+        
+        # Log the request data
+        logger.info(f"STREAM CHAT REQUEST: {json.dumps(request.dict(), default=str)}")
+        
+        # Determine language asynchronously
+        language = request.language
+        if not language:
+            def detect_lang():
+                try:
+                    return detect_language(text) or "en"
+                except:
+                    return "en"
+            
+            language = await asyncio.to_thread(detect_lang)
+        
+        # Create or get conversation and fetch initial data
+        conversation_id = await get_or_create_conversation(
+            request.conversation_id, request.user_id, language
+        )
+        
+        # Get history and metadata
+        history = await get_history_cached(conversation_id)
+        conv_data = await db_fetch_one_async(
+            "SELECT meta_data FROM conversations WHERE id = $1", (conversation_id,)
+        )
+        
+        # Initialize state with available information
+        state = CustomerState(
+            query=text,
+            user_id=request.user_id,
+            language=language,
+            conversation_id=conversation_id,
+            conversation_history=history,
+            mall_id=request.mall_id
+        )
+        
+        # Classify query type and intent
+        state = await classify_query_type(state)
+        state = await classify_intent(state)
+        
+        # Stream the response
+        async def response_generator():
+            full_response = ""
+            
+            # First chunk should include the conversation_id
+            yield json.dumps({
+                "type": "start",
+                "conversation_id": conversation_id
+            }) + "\n"
+            
+            logger.info("=== DIRECT OPENAI STREAMING IMPLEMENTATION ===")
+            
+            # Format history for context
+            formatted_history = (
+                "\n".join(
+                    [
+                        f"{msg['role'].upper()}: {msg['content']}"
+                        for msg in history[-6:]
+                    ]
+                )
+                if history
+                else "No prior conversation."
+            )
+            
+            # Get mall name from database
+            mall_name = "the mall"
+            if request.mall_id:
+                mall = await db_fetch_one_async(
+                    "SELECT marketing_name AS name_en FROM malls WHERE unique_property_id = $1",
+                    (request.mall_id,),
+                )
+                if mall:
+                    mall_name = mall["name_en"]
+            
+            # Track conversation topic for multi-turn handling
+            current_topic = state.query_type or ""
+            if state.intent:
+                current_topic = f"{current_topic}_{state.intent}" if current_topic else state.intent
+                
+            # Check if this is a new topic or continuing
+            meta_data = {}
+            if conv_data and conv_data.get("meta_data"):
+                try:
+                    meta_data = json.loads(conv_data["meta_data"])
+                except (json.JSONDecodeError, TypeError):
+                    meta_data = {}
+                    
+            state_data = meta_data.get("state", {})
+            prev_topic = state_data.get("conversation_topic", "")
+            prev_turn_count = state_data.get("topic_turn_count", 0)
+            
+            if prev_topic != current_topic:
+                topic_turn_count = 1
+            else:
+                topic_turn_count = prev_turn_count + 1
+            
+            # Process context data to provide relevant information
+            await refine_context(state)
+            context_data = state.context_data or {}
+            
+            # Import OpenAI directly here for direct streaming
+            from openai import AsyncOpenAI
+            
+            # Get API key
+            openai_api_key = os.getenv("OPENAI_API_KEY")
+            if not openai_api_key:
+                raise ValueError("OPENAI_API_KEY environment variable is not set")
+            
+            # Create direct OpenAI client
+            client = AsyncOpenAI(api_key=openai_api_key)
+            
+            # Prepare prompt using customer_prompt template from customer.py
+            prompt_values = {
+                "context": json.dumps(context_data),
+                "query": text,
+                "lang": language,
+                "conversation_history": formatted_history,
+                "mall_name": mall_name,
+                "resolved_entity": context_data.get("resolved_entity", ""),
+                "topic_turn_count": topic_turn_count,
+                "conversation_topic": current_topic
+            }
+            
+            # Format the prompt using customer_prompt from customer.py
+            prompt_text = customer_prompt.format(**prompt_values)
+            
+            # Set up the streaming request
+            stream_chunks = []
+            stream = await client.chat.completions.create(
+                model="gpt-4o-mini",  # Using the same model as in customer.py
+                messages=[{"role": "user", "content": prompt_text}],
+                stream=True,  # Enable streaming
+            )
+            
+            # Process the streaming response
+            async for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    logger.info(f"TOKEN: {content}")
+                    
+                    # Immediately yield each token as it comes in
+                    yield json.dumps({
+                        "type": "chunk",
+                        "content": content
+                    }) + "\n"
+                    
+                    # Save the token
+                    full_response += content
+                    stream_chunks.append(content)
+            
+            logger.info("=== STREAMING COMPLETE ===")
+            logger.info(f"Final response: {full_response}")
+            
+            # After streaming is complete, save the conversation
+            logger.info(f"Saving conversation, full response length: {len(full_response)}")
+            await add_message(conversation_id, "user", text)
+            await add_message(conversation_id, "assistant", full_response)
+            
+            # Update history for metadata
+            updated_history = history + [
+                {"role": "user", "content": text},
+                {"role": "assistant", "content": full_response},
+            ]
+            
+            # Update conversation state in metadata
+            meta_data = {
+                "language": language,
+                "state": {
+                    "response": full_response,
+                    "conversation_history": updated_history,
+                    "conversation_topic": current_topic,
+                    "topic_turn_count": topic_turn_count,
+                    "query_type": state.query_type,
+                    "intent": state.intent
+                }
+            }
+            
+            await db_execute_async(
+                "UPDATE conversations SET meta_data = $1 WHERE id = $2",
+                (json.dumps(meta_data, cls=DateTimeEncoder), conversation_id),
+            )
+            
+            # Send completion message
+            final_data = {
+                "type": "end",
+                "conversation_id": conversation_id
+            }
+                    
+            yield json.dumps(final_data) + "\n"
+        
+        return StreamingResponse(
+            response_generator(),
+            media_type="application/x-ndjson"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error processing stream chat request: {e}")
+        
+        # Return error as a streaming response to maintain consistency
+        async def error_generator():
+            yield json.dumps({
+                "type": "error",
+                "message": f"Streaming error occurred: {str(e)}",
+                "conversation_id": request.conversation_id or str(uuid.uuid4())
+            }) + "\n"
+        
+        return StreamingResponse(
+            error_generator(),
+            media_type="application/x-ndjson"
+        )
 
 
 # @app.post("/tenant/update")
