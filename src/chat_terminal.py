@@ -11,6 +11,7 @@ from rich.prompt import Prompt
 from rich.panel import Panel
 from rich.markdown import Markdown
 from rich import print
+from auth import dummy_token  # Import the dummy token from auth.py
 
 # Terminal colors and styling
 console = Console()
@@ -25,6 +26,7 @@ class ChatTerminal:
         self.mall_id = None
         self.language = "en"
         self.malls = []
+        self.headers = {"Authorization": f"Bearer {dummy_token}"}  # Set up headers with the token
 
     async def login(self):
         email = Prompt.ask("[bold blue]Email[/bold blue]")
@@ -32,7 +34,9 @@ class ChatTerminal:
 
         try:
             response = requests.post(
-                f"{API_URL}/login", json={"email": email, "password": password}
+                f"{API_URL}/login", 
+                json={"email": email, "password": password},
+                headers=self.headers  # Add headers with authentication token
             )
             if response.status_code == 200:
                 self.user_id = response.json()["user_id"]
@@ -49,7 +53,10 @@ class ChatTerminal:
 
     async def get_malls(self):
         try:
-            response = requests.get(f"{API_URL}/malls")
+            response = requests.get(
+                f"{API_URL}/malls",
+                headers=self.headers  # Add headers with authentication token
+            )
             if response.status_code == 200:
                 self.malls = response.json()
                 console.print("[green]Available malls:[/green]")
@@ -99,7 +106,11 @@ class ChatTerminal:
             if self.user_id:
                 payload["user_id"] = self.user_id
 
-            response = requests.post(f"{API_URL}/chat", json=payload)
+            response = requests.post(
+                f"{API_URL}/chat", 
+                json=payload,
+                headers=self.headers  # Add headers with authentication token
+            )
 
             if response.status_code == 200:
                 data = response.json()

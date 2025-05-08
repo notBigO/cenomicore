@@ -10,7 +10,7 @@ import os
 import asyncio
 from pinecone import Pinecone
 from langchain_huggingface import HuggingFaceEmbeddings
-from src.utils import (
+from utils import (
     db_fetch_all_async,
     db_fetch_one_async,
     convert_to_json_safe,
