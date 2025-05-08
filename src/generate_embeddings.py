@@ -16,7 +16,7 @@ DB_CONFIG = {
     "user": os.getenv("DB_USER", "postgres"),
     "password": os.getenv("DB_PASSWORD", "your_password"),
     "host": os.getenv("DB_HOST", "localhost"),
-    "port": os.getenv("DB_PORT", "5432")
+    "port": os.getenv("DB_PORT", "5432"),
 }
 print(DB_CONFIG)
 
@@ -34,12 +34,13 @@ if INDEX_NAME not in existing_indexes:
         name=INDEX_NAME,
         dimension=384,
         metric="cosine",
-        spec=ServerlessSpec(cloud="aws", region="us-east-1")
+        spec=ServerlessSpec(cloud="aws", region="us-east-1"),
     )
 index = pc.Index(INDEX_NAME)
 
 # Load multilingual model for embeddings
-model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+
 
 # Function to connect to PostgreSQL and fetch data
 def fetch_data(query, batch_size=100):
@@ -57,7 +58,9 @@ def fetch_data(query, batch_size=100):
             columns = [desc[0] for desc in cur.description]
             batch = [dict(zip(columns, row)) for row in rows]
             all_data.extend(batch)
-            print(f"Fetched {len(batch)} rows at offset {offset}, total so far: {len(all_data)}")
+            print(
+                f"Fetched {len(batch)} rows at offset {offset}, total so far: {len(all_data)}"
+            )
             offset += batch_size
             cur.close()
             conn.close()
@@ -65,6 +68,7 @@ def fetch_data(query, batch_size=100):
             print(f"Database error at offset {offset}: {e}")
             break
     return all_data
+
 
 def convert_metadata(metadata):
     converted = {}
@@ -86,7 +90,10 @@ def convert_metadata(metadata):
             converted[key] = value
     return converted
 
-def upsert_embeddings(data, id_prefix, text_field_en, text_field_ar, metadata_fields=None):
+
+def upsert_embeddings(
+    data, id_prefix, text_field_en, text_field_ar, metadata_fields=None
+):
     vectors = []
     for item in data:
         text_en = item[text_field_en] if item[text_field_en] is not None else ""
@@ -101,23 +108,28 @@ def upsert_embeddings(data, id_prefix, text_field_en, text_field_ar, metadata_fi
         metadata_en = {k: item[k] for k in metadata_fields if k in item}
         metadata_en.update({"lang": "en", "type": id_prefix})
         metadata_en = convert_metadata(metadata_en)
-        vectors.append({"id": vector_id_en, "values": embedding_en, "metadata": metadata_en})
+        vectors.append(
+            {"id": vector_id_en, "values": embedding_en, "metadata": metadata_en}
+        )
 
         embedding_ar = model.encode(text_ar).tolist()
         vector_id_ar = f"{id_prefix}_{item['id']}_ar"
         metadata_ar = {k: item[k] for k in metadata_fields if k in item}
         metadata_ar.update({"lang": "ar", "type": id_prefix})
         metadata_ar = convert_metadata(metadata_ar)
-        vectors.append({"id": vector_id_ar, "values": embedding_ar, "metadata": metadata_ar})
+        vectors.append(
+            {"id": vector_id_ar, "values": embedding_ar, "metadata": metadata_ar}
+        )
 
     batch_size = 100
     try:
         for i in range(0, len(vectors), batch_size):
-            batch = vectors[i:i + batch_size]
+            batch = vectors[i : i + batch_size]
             index.upsert(vectors=batch)
         print(f"Upserted {len(vectors)} embeddings for {id_prefix}")
     except Exception as e:
         print(f"Error upserting {id_prefix} embeddings: {e}")
+
 
 def main():
     # 1. Malls (previously unique_properties)
@@ -129,9 +141,24 @@ def main():
     """
     malls = fetch_data(malls_query)
     upsert_embeddings(
-        malls, "mall", "name_en", "name_ar",
-        ["id", "unique_property_id", "name_en", "name_ar", "city", "country", "mall_information", 
-         "image", "gps_coordinates", "property_group_id", "created_at", "updated_at"]
+        malls,
+        "mall",
+        "name_en",
+        "name_ar",
+        [
+            "id",
+            "unique_property_id",
+            "name_en",
+            "name_ar",
+            "city",
+            "country",
+            "mall_information",
+            "image",
+            "gps_coordinates",
+            "property_group_id",
+            "created_at",
+            "updated_at",
+        ],
     )
 
     # 2. Brands (previously stores)
@@ -152,16 +179,51 @@ def main():
     """
     brands = fetch_data(brands_query)
     upsert_embeddings(
-        brands, "store", "name_en", "name_ar",
-        ["id", "brand_id", "name_en", "name_ar", "category_en", "category_ar", 
-         "description_en", "description_ar", "company_name_en", "company_name_ar",
-         "group_name", "group_name_ar", "tenant_profile_id", "brand_profile_id",
-         "store_phone_code", "store_phone_number", "store_email", "store_website",
-         "publish_date", "is_published", "anchor_brand", "brand_logo",
-         "social_tiktok", "social_instagram", "social_facebook", "social_threads",
-         "social_twitter", "social_snapchat", "social_youtube",
-         "banner_en", "banner_ar", "images_en", "images_ar", "tags_en", "tags_ar", 
-         "pms_unit_codes", "created_at", "updated_at", "mall_id"]
+        brands,
+        "store",
+        "name_en",
+        "name_ar",
+        [
+            "id",
+            "brand_id",
+            "name_en",
+            "name_ar",
+            "category_en",
+            "category_ar",
+            "description_en",
+            "description_ar",
+            "company_name_en",
+            "company_name_ar",
+            "group_name",
+            "group_name_ar",
+            "tenant_profile_id",
+            "brand_profile_id",
+            "store_phone_code",
+            "store_phone_number",
+            "store_email",
+            "store_website",
+            "publish_date",
+            "is_published",
+            "anchor_brand",
+            "brand_logo",
+            "social_tiktok",
+            "social_instagram",
+            "social_facebook",
+            "social_threads",
+            "social_twitter",
+            "social_snapchat",
+            "social_youtube",
+            "banner_en",
+            "banner_ar",
+            "images_en",
+            "images_ar",
+            "tags_en",
+            "tags_ar",
+            "pms_unit_codes",
+            "created_at",
+            "updated_at",
+            "mall_id",
+        ],
     )
 
     # 3. Products
@@ -176,9 +238,26 @@ def main():
     products = fetch_data(products_query)
     # Since products table doesn't seem to have AR fields, we'll use the same field for both
     upsert_embeddings(
-        products, "product", "name", "name",
-        ["id", "brand_id", "name", "description", "price", "category", "brand_name_en", "mall_id",
-         "is_featured", "in_stock", "image_url", "attributes", "created_at", "updated_at"]
+        products,
+        "product",
+        "name",
+        "name",
+        [
+            "id",
+            "brand_id",
+            "name",
+            "description",
+            "price",
+            "category",
+            "brand_name_en",
+            "mall_id",
+            "is_featured",
+            "in_stock",
+            "image_url",
+            "attributes",
+            "created_at",
+            "updated_at",
+        ],
     )
 
     # 4. Engagements (previously offers/events)
@@ -193,12 +272,36 @@ def main():
     """
     engagements = fetch_data(engagements_query)
     upsert_embeddings(
-        engagements, "engagement", "name_en", "name_ar",
-        ["id", "engagement_id", "brand_id", "mall_id", "name_en", "name_ar", "type",
-         "description_en", "description_ar", "terms_conditions_en", "terms_conditions_ar",
-         "start_date", "end_date", "publish_date", "is_exclusive", "ext_url", 
-         "home_banner_disp", "images_en", "images_ar", "tags_en", "tags_ar",
-         "tenant_profile_id", "created_at", "updated_at"]
+        engagements,
+        "engagement",
+        "name_en",
+        "name_ar",
+        [
+            "id",
+            "engagement_id",
+            "brand_id",
+            "mall_id",
+            "name_en",
+            "name_ar",
+            "type",
+            "description_en",
+            "description_ar",
+            "terms_conditions_en",
+            "terms_conditions_ar",
+            "start_date",
+            "end_date",
+            "publish_date",
+            "is_exclusive",
+            "ext_url",
+            "home_banner_disp",
+            "images_en",
+            "images_ar",
+            "tags_en",
+            "tags_ar",
+            "tenant_profile_id",
+            "created_at",
+            "updated_at",
+        ],
     )
 
     # 5. Services
@@ -211,12 +314,27 @@ def main():
     services = fetch_data(services_query)
     # Using name_ar if available, falling back to name if not
     upsert_embeddings(
-        services, "service", "name", "name_ar",
-        ["id", "name", "name_ar", "description", "description_ar", "icon_url",
-         "is_available", "location", "mall_id", "created_at", "updated_at"]
+        services,
+        "service",
+        "name",
+        "name_ar",
+        [
+            "id",
+            "name",
+            "name_ar",
+            "description",
+            "description_ar",
+            "icon_url",
+            "is_available",
+            "location",
+            "mall_id",
+            "created_at",
+            "updated_at",
+        ],
     )
 
     print("All embeddings successfully uploaded to Pinecone!")
+
 
 if __name__ == "__main__":
     main()

@@ -6,6 +6,7 @@ import logging
 import os
 from typing import Optional, List, Dict, Any, Union
 from pydantic import BaseModel
+
 from langdetect import detect
 from dotenv import load_dotenv
 import redis
@@ -63,13 +64,16 @@ REDIS_CONFIG = {
     "db": int(os.getenv("REDIS_DB", "0")),
     "password": os.getenv("REDIS_PASSWORD", None),
     "decode_responses": True,
-    "max_connections": int(os.getenv("REDIS_MAX_CONNECTIONS", "10"))
+    "max_connections": int(os.getenv("REDIS_MAX_CONNECTIONS", "10")),
 }
 
 # Redis setup with connection pooling
 REDIS_POOL = redis.ConnectionPool(**REDIS_CONFIG)
+
+
 def get_redis_client():
     return redis.Redis(connection_pool=REDIS_POOL)
+
 
 REDIS_CLIENT = get_redis_client()
 
@@ -85,11 +89,12 @@ MEMORY_CACHE = {}
 MEMORY_CACHE_MAX_SIZE = 100
 MEMORY_CACHE_TTL = 60  # 1 minute
 
+
 def set_memory_cache(key, value, ttl=MEMORY_CACHE_TTL):
     """Set a value in the memory cache with expiration"""
     now = datetime.now().timestamp()
     MEMORY_CACHE[key] = (value, now + ttl)
-    
+
     # Clean up cache if it's too large
     if len(MEMORY_CACHE) > MEMORY_CACHE_MAX_SIZE:
         # Remove expired items
@@ -97,13 +102,14 @@ def set_memory_cache(key, value, ttl=MEMORY_CACHE_TTL):
         expired_keys = [k for k, v in MEMORY_CACHE.items() if v[1] < current_time]
         for k in expired_keys:
             MEMORY_CACHE.pop(k, None)
-        
+
         # If still too large, remove oldest items
         if len(MEMORY_CACHE) > MEMORY_CACHE_MAX_SIZE:
             items = sorted(MEMORY_CACHE.items(), key=lambda x: x[1][1])
-            to_remove = items[:len(items) // 4]  # Remove 25% of oldest items
+            to_remove = items[: len(items) // 4]  # Remove 25% of oldest items
             for k, _ in to_remove:
                 MEMORY_CACHE.pop(k, None)
+
 
 def get_memory_cache(key):
     """Get a value from memory cache if it exists and hasn't expired"""
@@ -115,32 +121,34 @@ def get_memory_cache(key):
             MEMORY_CACHE.pop(key, None)
     return None
 
+
 # Helper function to safely decode Redis responses
 def safe_redis_decode(value):
     """Safely decode a Redis response to a string"""
     if value is None:
         return None
     if isinstance(value, bytes):
-        return value.decode('utf-8')
+        return value.decode("utf-8")
     elif not isinstance(value, str):
         return str(value)
     return value
+
 
 # Helper function to handle Redis JSON serialization/deserialization
 def redis_get_json(key):
     """Get a JSON value from Redis with safe decoding"""
     redis_client = get_redis_client()
-    
+
     # Check memory cache first
     mem_cached = get_memory_cache(f"json:{key}")
     if mem_cached is not None:
         return mem_cached
-    
+
     # Try Redis if not in memory cache
     value = redis_client.get(key)
     if value is None:
         return None
-    
+
     try:
         value = safe_redis_decode(value)
         if value is None:
@@ -151,6 +159,7 @@ def redis_get_json(key):
         return result
     except (json.JSONDecodeError, TypeError):
         return None
+
 
 def redis_set_json(key, value, ex=MEDIUM_CACHE_TTL):
     """Set a JSON value in Redis with expiry"""
@@ -165,14 +174,17 @@ def redis_set_json(key, value, ex=MEDIUM_CACHE_TTL):
         logger.warning(f"Error setting Redis JSON value: {e}")
         return False
 
+
 # Asyncpg pool
 DB_POOL: Optional[Pool] = None
+
 
 async def get_db_pool():
     global DB_POOL
     if DB_POOL is None:
         DB_POOL = await asyncpg.create_pool(**DB_CONFIG_ASYNC)
     return DB_POOL
+
 
 class DateTimeEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -182,6 +194,7 @@ class DateTimeEncoder(json.JSONEncoder):
             return float(obj)
         return super().default(obj)
 
+
 class Message(BaseModel):
     role: str
     content: str
@@ -189,6 +202,7 @@ class Message(BaseModel):
 
     def dict(self):
         return {"role": self.role, "content": self.content, "timestamp": self.timestamp}
+
 
 # Asynchronous DB functions
 async def db_fetch_one_async(query: str, params: tuple = ()):
@@ -199,16 +213,19 @@ async def db_fetch_one_async(query: str, params: tuple = ()):
             return dict(row)
         return None
 
+
 async def db_fetch_all_async(query: str, params: tuple = ()):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(query, *params)
         return [dict(row) for row in rows]
 
+
 async def db_execute_async(query: str, params: tuple = ()):
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         await conn.execute(query, *params)
+
 
 def convert_to_json_safe(data):
     if isinstance(data, list):
@@ -227,98 +244,116 @@ def detect_language(text: str) -> str:
     except Exception:
         return "en"
 
-async def get_or_create_conversation(conversation_id: Optional[str], user_id: Optional[str], language: str) -> str:
+
+async def get_or_create_conversation(
+    conversation_id: Optional[str], user_id: Optional[str], language: str
+) -> str:
     if conversation_id:
         # Check if the conversation exists
         existing_conversation = await db_fetch_one_async(
-            "SELECT id FROM conversations WHERE id = $1",
-            (conversation_id,)
+            "SELECT id FROM conversations WHERE id = $1", (conversation_id,)
         )
         if existing_conversation:
             # Update existing conversation
             await db_execute_async(
                 "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = $1",
-                (conversation_id,)
+                (conversation_id,),
             )
             return conversation_id
         else:
             # Create new conversation if the provided ID doesn't exist
-            logger.info(f"Conversation {conversation_id} not found, creating new conversation")
+            logger.info(
+                f"Conversation {conversation_id} not found, creating new conversation"
+            )
             return await create_new_conversation(user_id, language)
     else:
         # Create a new conversation
         return await create_new_conversation(user_id, language)
 
+
 async def create_new_conversation(user_id: Optional[str], language: str) -> str:
     new_conversation_id = str(uuid.uuid4())
-    user_id_clean = user_id[2:] if user_id and user_id.startswith(("t_", "c_")) else user_id
+    user_id_clean = (
+        user_id[2:] if user_id and user_id.startswith(("t_", "c_")) else user_id
+    )
     # Store language and state in meta_data as JSON
     meta_data = json.dumps({"language": language, "state": {}})
     await db_execute_async(
         "INSERT INTO conversations (id, user_id, meta_data, created_at, updated_at) VALUES ($1, $2, $3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
-        (new_conversation_id, user_id_clean, meta_data)
+        (new_conversation_id, user_id_clean, meta_data),
     )
     return new_conversation_id
+
 
 async def add_message_to_conversation(conversation_id: str, role: str, content: str):
     # Get the current max message_index
     max_index = await db_fetch_one_async(
         "SELECT COALESCE(MAX(message_index), -1) as max_idx FROM conversation_messages WHERE conversation_id = $1",
-        (conversation_id,)
+        (conversation_id,),
     )
     next_index = (max_index["max_idx"] + 1) if max_index else 0
-    
+
     # Generate a unique ID for the message
     message_id = str(uuid.uuid4())
-    
+
     await db_execute_async(
         "INSERT INTO conversation_messages (id, conversation_id, role, content, message_index) VALUES ($1, $2, $3, $4, $5)",
-        (message_id, conversation_id, role, content, next_index)
+        (message_id, conversation_id, role, content, next_index),
     )
 
-async def get_conversation_history(conversation_id: str, max_messages: int = 20) -> List[Message]:
+
+async def get_conversation_history(
+    conversation_id: str, max_messages: int = 20
+) -> List[Message]:
     cache_key = f"history:{conversation_id}"
     cached_history = REDIS_CLIENT.get(cache_key)
     if cached_history:
         # Ensure properly decoded string for JSON loading
         if isinstance(cached_history, bytes):
-            cached_history = cached_history.decode('utf-8')
+            cached_history = cached_history.decode("utf-8")
         elif not isinstance(cached_history, str):
             cached_history = str(cached_history)
         return [Message(**msg) for msg in json.loads(cached_history)]
-    
+
     messages = await db_fetch_all_async(
         "SELECT role, content, created_at as timestamp FROM conversation_messages "
         "WHERE conversation_id = $1 ORDER BY message_index DESC LIMIT $2",
-        (conversation_id, max_messages)
+        (conversation_id, max_messages),
     )
     history = [
         Message(role=msg["role"], content=msg["content"], timestamp=msg["timestamp"])
         for msg in reversed(messages)
     ]
-    REDIS_CLIENT.set(cache_key, json.dumps([msg.dict() for msg in history], cls=DateTimeEncoder), ex=300)
+    REDIS_CLIENT.set(
+        cache_key,
+        json.dumps([msg.dict() for msg in history], cls=DateTimeEncoder),
+        ex=300,
+    )
     return history
 
+
 # Optimized history fetch with improved caching
-async def get_history_cached(conversation_id: str, max_messages: int = 20) -> List[Dict[str, Any]]:
+async def get_history_cached(
+    conversation_id: str, max_messages: int = 20
+) -> List[Dict[str, Any]]:
     """
     Optimized function to get conversation history with enhanced caching.
     Uses memory cache -> Redis cache -> database with efficient querying.
     """
     cache_key = f"history_opt:{conversation_id}"
-    
+
     # Try memory cache first (fastest)
     mem_cached = get_memory_cache(cache_key)
     if mem_cached is not None:
         return mem_cached
-    
+
     # Try Redis cache next
     cached_history = redis_get_json(cache_key)
     if cached_history:
         # Store in memory cache for future quick access
         set_memory_cache(cache_key, cached_history)
         return cached_history
-    
+
     # Fetch from database using a more efficient query
     query = """
     SELECT role, content 
@@ -327,22 +362,23 @@ async def get_history_cached(conversation_id: str, max_messages: int = 20) -> Li
     ORDER BY message_index ASC 
     LIMIT $2
     """
-    
+
     messages = await db_fetch_all_async(query, (conversation_id, max_messages))
-    
+
     # Format messages for return
     history = [{"role": msg["role"], "content": msg["content"]} for msg in messages]
-    
+
     # Cache the result with a TTL
     redis_set_json(cache_key, history, ex=LONG_CACHE_TTL)
     set_memory_cache(cache_key, history)
-    
+
     return history
+
 
 def strip_markdown(text: str) -> str:
     """Remove markdown formatting symbols from text for TTS"""
     # Replace bold text (**text**) with just the text
-    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
     # Replace italic text (*text*) with just the text
-    text = re.sub(r'\*(.*?)\*', r'\1', text)
+    text = re.sub(r"\*(.*?)\*", r"\1", text)
     return text
