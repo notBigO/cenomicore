@@ -4,12 +4,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel
-from auth import verify_token
+from src.auth import verify_token
 import json
 from fastapi.responses import StreamingResponse, JSONResponse
 import base64
 import requests
-from utils import (
+from src.utils import (
     detect_language,
     get_or_create_conversation,
     db_fetch_all_async,
@@ -34,14 +34,14 @@ from utils import (
     set_memory_cache,
     strip_markdown,
 )
-from customer import CustomerState, customer_graph
+from src.customer import CustomerState, customer_graph
 
 # from src.tenant import TenantState, tenant_graph
 from typing import Optional, List, Dict, Any
 from langsmith import Client
 from langsmith import trace
 import os
-from customer import populate_knowledge_graph
+from src.customer import populate_knowledge_graph
 import uuid
 from io import BytesIO
 import functools
